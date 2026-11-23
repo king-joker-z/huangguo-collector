@@ -290,12 +290,12 @@ huangguo-collector/
 
 镜像已发布到 Docker Hub（`linux/amd64`，适配 Z4 Pro）：
 
-- **镜像**：`jokermelove/huangguo-collector:1.4.0`（另有 `latest`）
+- **镜像**：`jokermelove/huangguo-collector:1.4.1`（另有 `latest`）
 - **GitHub**：<https://github.com/king-joker-z/huangguo-collector>
 - **Actions**：推送到 `main` 自动构建并推送 Docker Hub，也可在 Actions 页手动 `Run workflow`
 
 ```sh
-docker pull jokermelove/huangguo-collector:1.4.0
+docker pull jokermelove/huangguo-collector:1.4.1
 ```
 
 ### 方式 A：极空间直接拉取镜像（推荐）
@@ -321,7 +321,7 @@ docker compose -f docker-compose.zspace.yml up -d
 本机有 Docker 时：
 
 ```sh
-docker build --platform linux/amd64 -t jokermelove/huangguo-collector:1.4.0 .
+docker build --platform linux/amd64 -t jokermelove/huangguo-collector:1.4.1 .
 # 或
 docker compose up -d --build
 ```
@@ -352,6 +352,13 @@ docker compose -f docker-compose.zspace.yml up -d
 
 - 容器默认以 root 运行，方便写入极空间挂载目录；如遇权限问题，给 `data` / `downloads` 目录放权即可。
 - `HUANGGUO_DOWNLOAD_ROOT` 在容器内是**强制值**：设置页里改下载路径，重启容器后会被环境变量改回 `/downloads`。要在容器里换目录，请改 compose 的 volume 映射。
+- **v1.4.1 修复了 Docker 下下载全部失败的问题**：旧版把临时文件放在 `/data/tmp`，最终文件在 `/downloads`，两者是两个独立挂载点，`os.replace` 会报 `EXDEV / Invalid cross-device link`。现在临时 `.part.mp4` 直接写在目标 Season 目录，最后同目录重命名。
+- 如果升级后仍失败，先看网页任务错误，或执行：
+
+```sh
+docker exec huangguo-collector python -c "import sqlite3;c=sqlite3.connect('/data/huangguo.db');[print(r) for r in c.execute(\"select id,quality,size,error from tasks where state='failed' order by id desc limit 10\")]"
+docker exec huangguo-collector df -h /data /downloads
+```
 - 本服务没有登录认证，**只建议局域网使用**，不要把 8765 端口直接暴露到公网；需要外网访问请套反向代理 + 认证。
 - 720P 压缩转码使用 CPU，极空间上并发不要开太高（建议 2）。
 - 升级：替换项目/镜像后重新 `docker compose up -d --build`，`data` 和 `downloads` 卷会保留。
@@ -360,3 +367,4 @@ docker compose -f docker-compose.zspace.yml up -d
 ## 13. 免责声明
 
 本项目只做本地采集与媒体库整理，不托管、不分发任何内容。请自行确认内容合法性、年龄限制与站点服务条款；因使用产生的任何后果由使用者承担。
+

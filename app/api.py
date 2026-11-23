@@ -89,7 +89,7 @@ def health():
         disk_free=free,
         download_root=str(settings.download_root),
         workers=downloads.worker_count,
-        version="1.4.0",
+        version="1.4.1",
     )
 
 
@@ -686,6 +686,7 @@ def watch(drama_id: int, ep: int):
 @router.get("/stream")
 def stream(request: Request, u: str = Query(...), t: str = Query(...)):
     return hls.stream(u, t, request.headers.get("range", ""))
+
 
 
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import queue
 import shutil
@@ -17,6 +18,7 @@ from .scraper import ScrapeError, Scraper
 from .settings import Settings
 
 QUALITY_LABEL = {"hevc": "1080P HEVC", "h264": "1080P H264", "720p": "720P 压缩"}
+logger = logging.getLogger(__name__)
 CREATE_NO_WINDOW = 0x08000000
 
 
@@ -193,6 +195,8 @@ class DownloadManager:
         self.db.update_task(
             task_id, state="failed", error=last_error[-500:], finished_at=now_str(), speed=0
         )
+        logger.error("download failed task=%s drama=%s ep=%s: %s",
+                     task_id, drama["id"], episode["ep"], last_error[-800:])
         self.db.set_episode_state(int(drama["id"]), int(episode["ep"]), "failed")
         self._cleanup_tmp(drama, episode)
 
@@ -205,6 +209,16 @@ class DownloadManager:
                 path.unlink()
             except OSError:
                 pass
+        # 视频临时文件现在写在目标目录，兼容清理旧位置和同目录 .part
+        try:
+            target = nfo.episode_path(self.settings, drama, int(ep))
+            for path in target.parent.glob(f".hg_{site_id}_{ep}_*.part.mp4"):
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+        except OSError:
+            pass
 
     def _finish_canceled(self, task_id: int, drama, episode) -> None:
         self.db.update_task(task_id, state="canceled", finished_at=now_str(), speed=0)
@@ -225,10 +239,12 @@ class DownloadManager:
 
         target = nfo.episode_path(self.settings, drama, int(episode["ep"]))
         target.parent.mkdir(parents=True, exist_ok=True)
-        tmp = TMP_DIR / f"{drama['site_id']}_ep{episode['ep']}_{task_id}.mp4"
-        if tmp.exists():
+        # 临时文件必须和最终文件在同一挂载点：Docker 里 /data 与 /downloads
+        # 是两个独立 volume，跨挂载点 os.replace 会报 EXDEV。
+        tmp = target.parent / f".hg_{drama['site_id']}_{episode['ep']}_{task_id}.part.mp4"
+        for stale in target.parent.glob(f".hg_{drama['site_id']}_{episode['ep']}_*.part.mp4"):
             try:
-                tmp.unlink()
+                stale.unlink()
             except OSError:
                 pass
 
@@ -258,7 +274,7 @@ class DownloadManager:
             cmd += ["-c", "copy"]
             if use_hevc:
                 cmd += ["-tag:v", "hvc1"]
-        cmd += ["-movflags", "+faststart", "-max_muxing_queue_size", "2048", str(tmp)]
+        cmd += ["-movflags", "+faststart", "-max_muxing_queue_size", "2048", "-f", "mp4", str(tmp)]
 
         env = os.environ.copy()
         proxy = self.settings.get("proxy").strip()

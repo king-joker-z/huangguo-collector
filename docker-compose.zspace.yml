@@ -1,11 +1,11 @@
-version: "3.9"
+﻿version: "3.9"
 
 # 极空间 Z4 Pro 示例。请把两个 volumes 的宿主机路径改成你自己的目录。
 # data:    数据库/封面/临时文件，必须持久化
 # downloads: 下载的视频和 NFO，建议指向大容量存储池
 services:
   huangguo:
-    image: jokermelove/huangguo-collector:1.4.0
+    image: jokermelove/huangguo-collector:1.4.1
     container_name: huangguo-collector
     platform: linux/amd64
     restart: unless-stopped
@@ -26,3 +26,4 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
+
