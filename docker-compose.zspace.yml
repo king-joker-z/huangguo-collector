@@ -5,10 +5,7 @@ version: "3.9"
 # downloads: 下载的视频和 NFO，建议指向大容量存储池
 services:
   huangguo:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: huangguo-collector:1.4.0
+    image: jokermelove/huangguo-collector:1.4.0
     container_name: huangguo-collector
     platform: linux/amd64
     restart: unless-stopped

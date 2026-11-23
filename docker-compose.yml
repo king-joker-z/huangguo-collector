@@ -5,7 +5,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: huangguo-collector:1.4.0
+    image: jokermelove/huangguo-collector:1.4.0
     container_name: huangguo-collector
     restart: unless-stopped
     init: true

@@ -288,58 +288,54 @@ huangguo-collector/
 
 ## Docker / 极空间 Z4 Pro
 
-镜像基于 `python:3.12-slim-bookworm` + Debian `ffmpeg`，目标架构 `linux/amd64`，适配极空间 Z4 Pro（x86_64）。
+镜像已发布到 Docker Hub（`linux/amd64`，适配 Z4 Pro）：
 
-仓库内已包含：
-
-- `Dockerfile`
-- `docker/entrypoint.sh`
-- `docker-compose.yml`（本地通用）
-- `docker-compose.zspace.yml`（极空间路径示例）
-- `docker-build.bat` / `docker-build.sh`（构建并导出 tar）
-- `.dockerignore`
-
-### 方式 A：极空间直接 Compose 构建
-
-1. 把整个项目目录上传到 NAS，例如 `/volume1/docker/huangguo-collector/`。
-2. 编辑 `docker-compose.zspace.yml` 的两个 `volumes`：
-   - `/volume1/docker/huangguo/data:/data`：数据库、封面、临时文件
-   - `/volume1/Media/Huangguo:/downloads`：下载的视频和 NFO
-3. 极空间 Docker → Compose → 新建项目，选择该目录/粘贴 YAML，部署。
-   或在 SSH 中：
+- **镜像**：`jokermelove/huangguo-collector:1.4.0`（另有 `latest`）
+- **GitHub**：<https://github.com/king-joker-z/huangguo-collector>
+- **Actions**：推送到 `main` 自动构建并推送 Docker Hub，也可在 Actions 页手动 `Run workflow`
 
 ```sh
-cd /volume1/docker/huangguo-collector
-docker compose -f docker-compose.zspace.yml up -d --build
+docker pull jokermelove/huangguo-collector:1.4.0
+```
+
+### 方式 A：极空间直接拉取镜像（推荐）
+
+1. 在 NAS 上建目录，例如 `/volume1/docker/huangguo/`。
+2. 把仓库里的 `docker-compose.zspace.yml` 放到该目录，按需修改两个 `volumes`：
+   - `/volume1/docker/huangguo/data:/data`：数据库、封面、临时文件
+   - `/volume1/Media/Huangguo:/downloads`：下载的视频和 NFO
+3. 极空间 Docker → Compose → 新建项目，选择该目录部署；或 SSH：
+
+```sh
+cd /volume1/docker/huangguo
+docker compose -f docker-compose.zspace.yml pull
+docker compose -f docker-compose.zspace.yml up -d
 ```
 
 4. 浏览器打开 `http://极空间IP:8765`。
 
-首次构建需要安装 ffmpeg，通常 5–15 分钟；之后启动很快。
+镜像已内置 ffmpeg、时区、健康检查，无需上传源码或本地构建。
 
-### 方式 B：本地构建 tar，导入极空间
+### 方式 B：自己构建（可选）
 
-在装有 Docker Desktop 的电脑上：
-
-```bat
-docker-build.bat
-```
-
-会生成 `huangguo-collector-1.4.0.tar`。在极空间 Docker → 镜像 → 导入该 tar，然后用 `docker-compose.zspace.yml` 启动：
+本机有 Docker 时：
 
 ```sh
-docker load -i huangguo-collector-1.4.0.tar
+docker build --platform linux/amd64 -t jokermelove/huangguo-collector:1.4.0 .
+# 或
+docker compose up -d --build
+```
+
+Windows 可双击 `docker-build.bat` 构建并导出 tar，再导入极空间。
+
+### 更新
+
+```sh
+docker compose -f docker-compose.zspace.yml pull
 docker compose -f docker-compose.zspace.yml up -d
 ```
 
-如果只用导入的镜像，可把 `docker-compose.zspace.yml` 里的 `build:` 两行删掉。
-
-### 发布到 Docker Hub / 私有仓库
-
-```sh
-docker tag huangguo-collector:1.4.0 <你的用户名>/huangguo-collector:1.4.0
-docker push <你的用户名>/huangguo-collector:1.4.0
-```
+`data` 和 `downloads` 卷会保留；`HUANGGUO_DATA_DIR` / `HUANGGUO_DOWNLOAD_ROOT` 在容器内生效。
 
 然后把 compose 里的 `image:` 改成对应仓库地址、删掉 `build:`，极空间直接 `docker compose up -d` 即可。
 
