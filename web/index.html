@@ -1,0 +1,104 @@
+﻿<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>黄果媒体库 · Huangguo Library</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/style.css?v=2">
+</head>
+<body>
+  <header class="topbar">
+    <button class="mobile-menu" id="mobile-menu" title="菜单">☰</button>
+    <a class="brand" href="#/library">
+      <span class="logo">果</span>
+      <span class="brand-text"><b>黄果媒体库</b><small id="updated-at">本地采集器</small></span>
+    </a>
+
+    <label class="search" id="search-wrap">
+      <span class="ico">⌕</span>
+      <input id="search-input" type="search" placeholder="搜索标题 / 标签 / 站点 ID…" autocomplete="off">
+      <button class="clr" id="search-clear" type="button" title="清空">×</button>
+      <kbd>/</kbd>
+    </label>
+
+    <div class="hstats">
+      <span>共 <b id="hs-total">0</b> 部</span>
+      <span class="g">已下载 <b id="hs-done">0</b> 集</span>
+      <span class="r">更新 <b id="hs-updates">0</b></span>
+      <span class="s">订阅 <b id="hs-subs">0</b></span>
+    </div>
+
+    <div class="hactions">
+      <button class="btn" id="btn-filter" title="筛选">
+        <span>筛选</span><span class="badge hidden" id="filter-count">0</span>
+      </button>
+      <button class="btn pri" id="btn-scan">＋ 开始采集</button>
+      <button class="btn icon" id="btn-open-root" title="打开下载目录">▣</button>
+    </div>
+  </header>
+
+  <div class="layout">
+    <aside class="side" id="sidebar">
+      <div class="side-status" id="status-list"></div>
+
+      <div class="side-head"><b>功能</b></div>
+      <nav class="side-nav">
+        <a class="snav" data-nav="updates" href="#/updates"><span class="ic">↻</span><span>更新提醒</span><i id="nav-updates">0</i></a>
+        <a class="snav" data-nav="downloads" href="#/downloads"><span class="ic">↓</span><span>下载队列</span><i id="nav-tasks">0</i></a>
+        <a class="snav" data-nav="subscriptions" href="#/subscriptions"><span class="ic">◉</span><span>订阅追更</span><i id="nav-subs">0</i></a>
+        <a class="snav" data-nav="schedules" href="#/schedules"><span class="ic">⏱</span><span>定时任务</span></a>
+        <a class="snav" data-nav="tags" href="#/tags"><span class="ic">#</span><span>标签管理</span></a>
+        <a class="snav" data-nav="settings" href="#/settings"><span class="ic">⚙</span><span>设置</span></a>
+      </nav>
+
+      <div class="side-head"><b>模块</b><i id="module-total">0</i></div>
+      <div class="side-modules" id="module-list"></div>
+
+      <div class="side-head">
+        <b>题材 / 标签</b><i id="tag-total">0</i>
+        <button class="side-link" data-action="manage-tags">管理</button>
+      </div>
+      <input class="afilter" id="tag-search" placeholder="筛选题材、标签…" autocomplete="off">
+      <div class="side-tags" id="tag-list"></div>
+
+      <div class="side-foot">
+        <div class="storage">
+          <div class="storage-top"><span>媒体库占用</span><b id="storage-used">0 B</b></div>
+          <div class="storage-bar"><span id="storage-fill"></span></div>
+          <div class="storage-bottom"><span id="storage-free">磁盘剩余 --</span><span id="storage-eps">0 集</span></div>
+        </div>
+        <div class="side-version"><span class="dot online" id="health-dot"></span><span id="health-text">v1.4 · 本地服务</span></div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <div class="scan-banner hidden" id="scan-banner">
+        <div class="scan-pulse"></div>
+        <div class="scan-text"><b id="scan-title">正在采集</b><span id="scan-message">准备中…</span></div>
+        <div class="scan-progress"><span id="scan-fill"></span></div>
+        <div class="scan-counter" id="scan-counter">0 / 0</div>
+        <button class="btn sm" id="scan-cancel">停止</button>
+      </div>
+      <div class="scan-banner cover-banner hidden" id="cover-banner">
+        <div class="scan-pulse"></div>
+        <div class="scan-text"><b>正在补全集封面</b><span id="cover-message">准备中…</span></div>
+        <div class="scan-progress"><span id="cover-fill"></span></div>
+        <div class="scan-counter" id="cover-counter">0 / 0</div>
+      </div>
+      <div id="view"></div>
+    </main>
+  </div>
+
+  <div class="side-backdrop" id="side-backdrop"></div>
+  <div class="batchbar" id="batchbar"></div>
+  <div id="toasts" class="toasts"></div>
+  <div id="modal-root"></div>
+
+  <script src="/static/hls.min.js"></script>
+  <script src="/static/app.js?v=2"></script>
+</body>
+</html>
+
+

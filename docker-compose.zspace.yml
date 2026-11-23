@@ -1,0 +1,31 @@
+version: "3.9"
+
+# 极空间 Z4 Pro 示例。请把两个 volumes 的宿主机路径改成你自己的目录。
+# data:    数据库/封面/临时文件，必须持久化
+# downloads: 下载的视频和 NFO，建议指向大容量存储池
+services:
+  huangguo:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: huangguo-collector:1.4.0
+    container_name: huangguo-collector
+    platform: linux/amd64
+    restart: unless-stopped
+    init: true
+    ports:
+      - "8765:8765"
+    environment:
+      TZ: Asia/Shanghai
+      HUANGGUO_DATA_DIR: /data
+      HUANGGUO_DOWNLOAD_ROOT: /downloads
+    volumes:
+      - /volume1/docker/huangguo/data:/data
+      - /volume1/Media/Huangguo:/downloads
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/api/health', timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s

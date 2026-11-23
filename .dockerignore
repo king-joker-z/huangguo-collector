@@ -1,0 +1,14 @@
+.git
+.gitignore
+__pycache__/
+*.py[cod]
+*.log
+data/
+downloads/
+huangguo-downloads/
+huangguo-downloads-test/
+*.zip
+*.tar
+_probe/
+.venv/
+node_modules/
