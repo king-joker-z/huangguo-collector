@@ -10,7 +10,24 @@ permissions:
   contents: read
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run tests
+        run: python -m unittest discover -s tests -v
+
   docker:
+    needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -33,7 +50,7 @@ jobs:
           images: ${{ secrets.DOCKERHUB_USERNAME }}/huangguo-collector
           tags: |
             type=raw,value=latest
-            type=raw,value=1.4.1
+            type=raw,value=1.4.2
             type=sha,prefix=sha-
 
       - name: Build and push
@@ -50,7 +67,7 @@ jobs:
       - name: Smoke test image
         run: |
           set -euo pipefail
-          IMAGE="${{ secrets.DOCKERHUB_USERNAME }}/huangguo-collector:1.4.1"
+          IMAGE="${{ secrets.DOCKERHUB_USERNAME }}/huangguo-collector:1.4.2"
           docker pull "$IMAGE"
           docker run -d --name hg-smoke -p 8765:8765 -e TZ=Asia/Shanghai "$IMAGE"
           for i in $(seq 1 30); do
@@ -63,4 +80,5 @@ jobs:
           grep -q '"ffmpeg":true' /tmp/health.json
           docker exec hg-smoke ffmpeg -version | head -1
           docker rm -f hg-smoke
+
 

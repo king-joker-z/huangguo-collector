@@ -180,15 +180,18 @@ class DownloadManager:
             if task_id in self.canceled or self.stop_event.is_set():
                 self._finish_canceled(task_id, drama, episode)
                 return
+            # HEVC 原画在部分 ffmpeg/容器环境可能不兼容；第二次起自动回退 H264。
+            attempt_quality = "h264" if quality == "hevc" and attempt >= 2 else quality
             try:
-                self._download_once(task_id, dict(drama), dict(episode), quality)
+                self._download_once(task_id, dict(drama), dict(episode), attempt_quality)
                 return
             except CanceledError:
                 self._finish_canceled(task_id, drama, episode)
                 return
             except Exception as exc:
                 last_error = str(exc)
-                self.db.update_task(task_id, error=f"第{attempt}次失败: {last_error}")
+                note = "（已回退 H264）" if attempt_quality != quality else ""
+                self.db.update_task(task_id, error=f"第{attempt}次失败{note}: {last_error}")
                 self.db.set_episode_state(int(drama["id"]), int(episode["ep"]), "queued")
                 if attempt < 3:
                     time.sleep(2 * attempt)
@@ -257,6 +260,7 @@ class DownloadManager:
             "-progress", "pipe:1",
             "-nostats",
             "-headers", header_text,
+            "-rw_timeout", "120000000",
             "-i", url,
             "-map", "0:v:0",
             "-map", "0:a:0?",

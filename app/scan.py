@@ -104,6 +104,7 @@ class ScanManager:
             self.job["errors"] = errors[-30:]
 
     def _run(self, modules: list[str], details: bool, max_pages: int | None, refresh: bool) -> None:
+        seen_detail_ids: set[int] = set()
         try:
             for module in modules:
                 if self.cancel_event.is_set():
@@ -163,7 +164,8 @@ class ScanManager:
                                 or has_update
                                 or refresh
                                 or self.db.need_detail(card["site_id"])
-                            ):
+                            ) and (drama_id not in seen_detail_ids or has_update):
+                                seen_detail_ids.add(drama_id)
                                 detail_ids.append(drama_id)
                         done_pages += 1
                         self._update(done_pages=done_pages)

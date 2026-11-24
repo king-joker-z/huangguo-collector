@@ -28,6 +28,15 @@
 
 > 仅用于个人媒体库整理。内容为成人向 AI 短剧（18+），请遵守站点条款与当地法律法规，不要公开传播。
 
+## 1.4.2 优化
+
+- HLS 播放代理按分片 token 隔离 CDN 鉴权头，避免同时播放/下载多集时串用 `x-cdn-auth`。
+- `/api/activity` 使用 2 秒统计缓存；补充 SQLite 热路径索引，降低 1.6 秒轮询开销。
+- 下载 HEVC 失败时第 2 次起自动回退 H.264；ffmpeg 增加 120 秒读超时，失败原因写入容器日志。
+- 全量扫描跨模块按 `drama_id` 去重详情抓取，减少原创/短剧/漫剧交叉收录的重复请求。
+- 容器/Linux 下点“打开目录”不再 500，改为提示宿主机路径。
+- 新增 12 个单测，并接入 GitHub Actions：测试通过才构建镜像。
+
 ---
 
 ## 1. 环境要求
@@ -290,12 +299,12 @@ huangguo-collector/
 
 镜像已发布到 Docker Hub（`linux/amd64`，适配 Z4 Pro）：
 
-- **镜像**：`jokermelove/huangguo-collector:1.4.1`（另有 `latest`）
+- **镜像**：`jokermelove/huangguo-collector:1.4.2`（另有 `latest`）
 - **GitHub**：<https://github.com/king-joker-z/huangguo-collector>
 - **Actions**：推送到 `main` 自动构建并推送 Docker Hub，也可在 Actions 页手动 `Run workflow`
 
 ```sh
-docker pull jokermelove/huangguo-collector:1.4.1
+docker pull jokermelove/huangguo-collector:1.4.2
 ```
 
 ### 方式 A：极空间直接拉取镜像（推荐）
@@ -321,7 +330,7 @@ docker compose -f docker-compose.zspace.yml up -d
 本机有 Docker 时：
 
 ```sh
-docker build --platform linux/amd64 -t jokermelove/huangguo-collector:1.4.1 .
+docker build --platform linux/amd64 -t jokermelove/huangguo-collector:1.4.2 .
 # 或
 docker compose up -d --build
 ```
@@ -352,7 +361,7 @@ docker compose -f docker-compose.zspace.yml up -d
 
 - 容器默认以 root 运行，方便写入极空间挂载目录；如遇权限问题，给 `data` / `downloads` 目录放权即可。
 - `HUANGGUO_DOWNLOAD_ROOT` 在容器内是**强制值**：设置页里改下载路径，重启容器后会被环境变量改回 `/downloads`。要在容器里换目录，请改 compose 的 volume 映射。
-- **v1.4.1 修复了 Docker 下下载全部失败的问题**：旧版把临时文件放在 `/data/tmp`，最终文件在 `/downloads`，两者是两个独立挂载点，`os.replace` 会报 `EXDEV / Invalid cross-device link`。现在临时 `.part.mp4` 直接写在目标 Season 目录，最后同目录重命名。
+- **v1.4.1 起修复了 Docker 下下载全部失败的问题**：旧版把临时文件放在 `/data/tmp`，最终文件在 `/downloads`，两者是两个独立挂载点，`os.replace` 会报 `EXDEV / Invalid cross-device link`。现在临时 `.part.mp4` 直接写在目标 Season 目录，最后同目录重命名。
 - 如果升级后仍失败，先看网页任务错误，或执行：
 
 ```sh
@@ -367,4 +376,5 @@ docker exec huangguo-collector df -h /data /downloads
 ## 13. 免责声明
 
 本项目只做本地采集与媒体库整理，不托管、不分发任何内容。请自行确认内容合法性、年龄限制与站点服务条款；因使用产生的任何后果由使用者承担。
+
 

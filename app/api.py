@@ -74,6 +74,20 @@ def _estimate(episodes: list[dict], total_ep: int) -> dict:
     }
 
 
+def _open_folder(folder: Path) -> dict:
+    folder.mkdir(parents=True, exist_ok=True)
+    if os.name != "nt":
+        return ok(
+            folder=str(folder),
+            message=f"服务器/容器内无法打开资源管理器，请在宿主机查看：{folder}",
+        )
+    try:
+        os.startfile(str(folder))  # type: ignore[attr-defined]
+    except Exception as exc:
+        fail(f"无法打开目录: {exc}", 500)
+    return ok(folder=str(folder), message="已在资源管理器打开")
+
+
 # --------------------------------------------------------------------- health
 @router.get("/health")
 def health():
@@ -89,13 +103,13 @@ def health():
         disk_free=free,
         download_root=str(settings.download_root),
         workers=downloads.worker_count,
-        version="1.4.1",
+        version="1.4.2",
     )
 
 
 @router.get("/stats")
 def stats():
-    data = db.stats()
+    data = db.stats(ttl=0)
     data["scan"] = scan.status()
     data["tasks"] = downloads.summary()
     return ok(**data)
@@ -229,23 +243,12 @@ def open_folder(drama_id: int):
     if not data:
         fail("剧集不存在", 404)
     folder = nfo.show_folder(settings, data)
-    folder.mkdir(parents=True, exist_ok=True)
-    try:
-        os.startfile(str(folder))  # type: ignore[attr-defined]
-    except Exception as exc:
-        fail(f"无法打开目录: {exc}", 500)
-    return ok(folder=str(folder))
+    return _open_folder(folder)
 
 
 @router.post("/open-root")
 def open_root():
-    folder = settings.download_root
-    folder.mkdir(parents=True, exist_ok=True)
-    try:
-        os.startfile(str(folder))  # type: ignore[attr-defined]
-    except Exception as exc:
-        fail(f"无法打开目录: {exc}", 500)
-    return ok(folder=str(folder), message="已在资源管理器打开下载目录")
+    return _open_folder(settings.download_root)
 
 
 @router.post("/dramas/batch")
@@ -686,6 +689,7 @@ def watch(drama_id: int, ep: int):
 @router.get("/stream")
 def stream(request: Request, u: str = Query(...), t: str = Query(...)):
     return hls.stream(u, t, request.headers.get("range", ""))
+
 
 
 

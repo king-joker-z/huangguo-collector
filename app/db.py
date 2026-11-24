@@ -1,9 +1,11 @@
 """SQLite 数据层：剧集、分集、标签、下载任务。"""
 from __future__ import annotations
 
+import copy
 import json
 import sqlite3
 import threading
+import time
 from datetime import datetime
 from typing import Any, Iterable
 
@@ -43,6 +45,11 @@ CREATE TABLE IF NOT EXISTS dramas (
 CREATE INDEX IF NOT EXISTS idx_dramas_module ON dramas(module);
 CREATE INDEX IF NOT EXISTS idx_dramas_update ON dramas(has_update);
 CREATE INDEX IF NOT EXISTS idx_dramas_score ON dramas(score);
+CREATE INDEX IF NOT EXISTS idx_dramas_last_scraped ON dramas(last_scraped_at DESC);
+CREATE INDEX IF NOT EXISTS idx_dramas_updated ON dramas(updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_dramas_update_updated ON dramas(has_update, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_dramas_favorite ON dramas(favorite);
+CREATE INDEX IF NOT EXISTS idx_dramas_year ON dramas(year);
 
 CREATE TABLE IF NOT EXISTS episodes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -62,6 +69,7 @@ CREATE TABLE IF NOT EXISTS episodes (
 );
 CREATE INDEX IF NOT EXISTS idx_episodes_drama ON episodes(drama_id);
 CREATE INDEX IF NOT EXISTS idx_episodes_state ON episodes(state);
+CREATE INDEX IF NOT EXISTS idx_episodes_drama_state ON episodes(drama_id, state);
 
 CREATE TABLE IF NOT EXISTS tags (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -95,6 +103,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     UNIQUE(drama_id, ep)
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_state ON tasks(state);
+CREATE INDEX IF NOT EXISTS idx_tasks_drama_state ON tasks(drama_id, state);
+CREATE INDEX IF NOT EXISTS idx_tasks_updated ON tasks(updated_at DESC);
 
 CREATE TABLE IF NOT EXISTS subscriptions (
     drama_id INTEGER PRIMARY KEY REFERENCES dramas(id) ON DELETE CASCADE,
@@ -164,6 +174,8 @@ def ordered_modules(modules: Any) -> list[str]:
 class Database:
     def __init__(self, path=DB_PATH) -> None:
         self.lock = threading.RLock()
+        self._stats_lock = threading.Lock()
+        self._stats_cache: tuple[float, dict] | None = None
         self.conn = sqlite3.connect(str(path), check_same_thread=False, timeout=60)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
@@ -844,7 +856,13 @@ class Database:
             item["tags"] = tag_map.get(item["id"], [])
         return items
 
-    def stats(self) -> dict:
+    def stats(self, ttl: float = 2.0) -> dict:
+        now_mono = time.monotonic()
+        if ttl > 0:
+            with self._stats_lock:
+                cached = self._stats_cache
+                if cached and now_mono - cached[0] < ttl:
+                    return copy.deepcopy(cached[1])
         total = int(self.query_one("SELECT COUNT(*) n FROM dramas")["n"])
         by_module = {
             r["module"]: int(r["n"])
@@ -907,7 +925,7 @@ class Database:
                    GROUP BY je.value ORDER BY count DESC, je.value LIMIT 48"""
             )
         ]
-        return {
+        result = {
             "total": total,
             "by_module": by_module,
             "cross_listed": max(0, sum(by_module.values()) - total),
@@ -926,6 +944,9 @@ class Database:
             "years": years,
             "site_tags": site_tags,
         }
+        with self._stats_lock:
+            self._stats_cache = (now_mono, copy.deepcopy(result))
+        return result
 
     def recent_activity(self, limit: int = 20) -> list[dict]:
         rows = self.query(

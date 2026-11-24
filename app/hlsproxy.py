@@ -28,6 +28,8 @@ class HlsProxy:
         self.scraper = scraper
         self.secret = secrets.token_bytes(24)
         self.cache: dict[tuple[str, int], tuple[float, str, dict]] = {}
+        # 每个分片 token 对应自己的 CDN 鉴权头，避免并发播放时串用其他集的 auth。
+        self.stream_headers: dict[str, tuple[float, dict[str, str]]] = {}
         self.lock = threading.RLock()
 
     # ------------------------------------------------------------------ signing
@@ -47,8 +49,17 @@ class HlsProxy:
         expected = hmac.new(self.secret, f"{url}|{expires}".encode(), hashlib.sha256).hexdigest()[:24]
         return hmac.compare_digest(expected, digest)
 
-    def proxy_url(self, absolute: str) -> str:
-        return f"/api/stream?u={quote(absolute, safe='')}&t={self.sign(absolute)}"
+    def proxy_url(self, absolute: str, headers: dict[str, str] | None = None) -> str:
+        token = self.sign(absolute)
+        if headers:
+            with self.lock:
+                now = time.time()
+                self.stream_headers[token] = (now + 7200, dict(headers))
+                if len(self.stream_headers) > 4096:
+                    self.stream_headers = {
+                        key: value for key, value in self.stream_headers.items() if value[0] > now
+                    }
+        return f"/api/stream?u={quote(absolute, safe='')}&t={token}"
 
     # -------------------------------------------------------------------- build
     def manifest(self, drama_id: int, ep: int) -> str:
@@ -80,13 +91,13 @@ class HlsProxy:
                 if "URI=" in line:
                     def replace(match: re.Match) -> str:
                         absolute = urljoin(base, match.group(1))
-                        return f'URI="{self.proxy_url(absolute)}"'
+                        return f'URI="{self.proxy_url(absolute, headers)}"'
 
                     line = URI_RE.sub(replace, line)
                 out_lines.append(line)
                 continue
             absolute = urljoin(base, line)
-            out_lines.append(self.proxy_url(absolute))
+            out_lines.append(self.proxy_url(absolute, headers))
 
         manifest = "\n".join(out_lines) + "\n"
         with self.lock:
@@ -103,11 +114,7 @@ class HlsProxy:
 
     # ------------------------------------------------------------------- stream
     def _headers_for(self, url: str) -> dict[str, str]:
-        headers = {"User-Agent": USER_AGENT, "Referer": SITE_BASE + "/", "Accept": "*/*"}
-        with self.lock:
-            for _, _, extra in self.cache.values():
-                headers.update(extra)
-        return headers
+        return {"User-Agent": USER_AGENT, "Referer": SITE_BASE + "/", "Accept": "*/*"}
 
     @staticmethod
     def _allowed(url: str) -> bool:
@@ -117,7 +124,9 @@ class HlsProxy:
     def stream(self, url: str, token: str, range_header: str = "") -> StreamingResponse:
         if not self.verify(url, token) or not self._allowed(url):
             return Response(status_code=403, content="forbidden")
-        headers = self._headers_for(url)
+        with self.lock:
+            entry = self.stream_headers.get(token)
+        headers = dict(entry[1]) if entry and entry[0] > time.time() else self._headers_for(url)
         if range_header:
             headers["Range"] = range_header
         try:
