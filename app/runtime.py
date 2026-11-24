@@ -9,12 +9,17 @@ from .scan import ScanManager
 from .scheduler import Scheduler
 from .scraper import Scraper
 from .settings import Settings
+from .yeguo import YeguoScraper
 
 db = Database()
 settings = Settings(db)
-scraper = Scraper(db, settings)
-downloads = DownloadManager(db, settings, scraper)
-scan = ScanManager(db, settings, scraper, downloads)
+scrapers = {
+    "huangguo": Scraper(db, settings),
+    "yeguo": YeguoScraper(db, settings),
+}
+scraper = scrapers["huangguo"]
+downloads = DownloadManager(db, settings, scrapers)
+scan = ScanManager(db, settings, scrapers, downloads)
 scheduler = Scheduler(db, settings, scan)
 covers = CoverBackfillManager(db, settings)
-hls = HlsProxy(db, settings, scraper)
+hls = HlsProxy(db, settings, scrapers)

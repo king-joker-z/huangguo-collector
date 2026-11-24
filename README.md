@@ -1,6 +1,6 @@
 # 黄果采集器 · Huangguo Collector
 
-面向 `huangguoai.com`（黄果短剧）的本地采集 + 媒体库管理工具。把站点三个模块（原创 / 短剧 / 漫剧）的剧集、分集、封面、简介、评分、标签采集到本地，并提供：
+面向 `huangguoai.com`（黄果短剧）和 `yeguodj.com`（野果短剧）的本地采集 + 媒体库管理工具。黄果按原创 / 短剧 / 漫剧三个模块采集，野果按探索分类全量采集；两站同名剧自动保留集数更多的版本。提供：
 
 - 直观的 Web 媒体库（深色界面，卡片式浏览、搜索、筛选、分页）
 - 一键下载整部剧 / 只下载新增分集 / 分批下载
@@ -8,7 +8,9 @@
 - 自动生成 Emby / Jellyfin / Kodi 电视剧刮削结构（NFO + 海报 + fanart）
 - 自动打「已下载」标签 + 自定义标签管理
 - 更新检测：重新扫描后标记「有更新」，直接补下新增分集
-- 定时任务：每天/每周指定时间自动全量扫库（最新 + 热播 + 精选）
+- 双站点：黄果（原创/短剧/漫剧）+ 野果（探索分类）
+- 跨站点同名合并：同名剧只保留集数最多的一个版本，重复条目隐藏但文件不删除
+- 定时任务：每天/每周指定时间自动全量扫库（最新 + 热播 + 精选 / 野果探索）
 - 订阅追更：订阅的剧在扫库发现新集后自动下载，可单独设置画质
 - 下载目录、目录模板可通过设置页或环境变量指定
 - 集封面：下载完成自动从视频抽帧生成 Jellyfin `-thumb.jpg`，支持单剧/批量/全部补全
@@ -28,7 +30,17 @@
 
 > 仅用于个人媒体库整理。内容为成人向 AI 短剧（18+），请遵守站点条款与当地法律法规，不要公开传播。
 
-## 1.4.3 优化与易用性
+## 1.5.0 多站点
+
+- 新增 **野果短剧**：列表 75 页、每页 20 部；用 curl_cffi 过 Cloudflare TLS 指纹。
+- 野果播放接口是 AES-CBC 加密 JSON，解密后一次拿到整部剧的全部分集、m3u8、每集封面，不用逐集开网页。
+- 野果封面复用现有图片解密协议；下载后仍自动抽帧生成 `-thumb.jpg`。
+- **同名跨站点合并**：标题做全角/空白/标点归一化，集数最多的为主版本；其他条目 `is_duplicate=1` 并从媒体库、更新、订阅和统计中隐藏，原文件保留。
+- 同名合并数会显示在左侧模块区，例如「同名合并 13 部」。
+- HLS 代理新增野果 CDN 域名白名单。
+- 新增 17 个单测。
+
+## 1.4.3 易用性
 
 - HLS 播放代理按分片 token 隔离 CDN 鉴权头，避免同时播放/下载多集时串用 `x-cdn-auth`。
 - `/api/activity` 使用 2 秒统计缓存；补充 SQLite 热路径索引，降低 1.6 秒轮询开销。
@@ -85,7 +97,7 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8766
 ## 3. 第一次使用
 
 1. 点右上角 **开始采集**。
-2. 勾选模块（原创 / 短剧 / 漫剧），页数留空 = 全部。
+2. 勾选模块（原创 / 短剧 / 漫剧 / 野果短剧），页数留空 = 全部。
 3. 保持 **同步详情与分集** 勾选（下载必需）。
 4. 开始。列表扫描很快；详情按 6 并发同步，全量约 5–15 分钟。
 5. 回到媒体库，点卡片进入详情，选画质后「下载全集」。
@@ -219,6 +231,7 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8766
   - 设置页「补全全部已下载集封面」：全库
 - 抽帧失败时用剧集海报兜底，不会留空。
 - 站点 `<video poster>` 实际是同剧海报且签名会过期，所以采用“从视频抽帧”而不是抓站点 poster。
+- 野果播放接口里每集有 `episode_cover`，会存入分集 `cover_url`；最终 Jellyfin 缩略图仍优先用视频抽帧，避免海报过期。
 
 ## 10. 目录结构
 
@@ -227,7 +240,8 @@ huangguo-collector/
   app/
     config.py       路径、模块、默认设置
     db.py           SQLite 表结构与数据访问
-    scraper.py      列表/详情/播放接口/封面解密
+    scraper.py      黄果列表/详情/播放接口/封面解密
+    yeguo.py        野果列表/播放 AES 解密/封面
     scan.py         全量与增量扫描调度
     scheduler.py    定时任务调度器
     covers.py       已下载分集的封面抽帧补全
@@ -257,9 +271,9 @@ huangguo-collector/
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/activity` | 扫描进度 + 活动任务 + 统计（前端 1.6s 轮询） |
-| POST | `/api/scan` | 开始扫描 `{modules, pages, details, refresh}` |
-| GET | `/api/dramas` | 分页/搜索/筛选/排序 |
-| GET | `/api/dramas/{id}` | 详情 + 分集 + 标签 + 空间估算 |
+| POST | `/api/scan` | 开始扫描 `{modules, pages, details, refresh}`，modules 支持 `yeguo` |
+| GET | `/api/dramas` | 分页/搜索/筛选/排序；支持 `source`、`include_duplicates` |
+| GET | `/api/dramas/{id}` | 详情 + 分集 + 标签 + 空间估算；重复条目返回 `duplicate_preferred` |
 | POST | `/api/dramas/{id}/download` | `{scope: all/new/eps, eps, quality}` |
 | POST | `/api/dramas/batch` | 批量下载/同步/打标签/收藏 |
 | GET | `/api/updates` | 有更新的剧 |
@@ -274,7 +288,7 @@ huangguo-collector/
 | POST | `/api/fs/mkdir` | 在指定目录下新建文件夹 |
 | GET | `/api/covers` | 集封面补全进度 |
 | POST | `/api/covers/backfill` | `{drama_ids}` 或 `{all:true}` 补全集封面 |
-| GET | `/api/site-check` | 测试站点连通性与延迟 |
+| GET | `/api/site-check` | 测试站点连通性；`?source=huangguo|yeguo` |
 | GET | `/api/tasks` | 队列与历史任务 |
 | POST | `/api/tasks/retry-failed` | 重试全部失败任务 |
 | POST | `/api/tasks/clear` | `{states}` 清理完成/取消/失败记录 |
@@ -306,12 +320,12 @@ huangguo-collector/
 
 镜像已发布到 Docker Hub（`linux/amd64`，适配 Z4 Pro）：
 
-- **镜像**：`jokermelove/huangguo-collector:1.4.3`（另有 `latest`）
+- **镜像**：`jokermelove/huangguo-collector:1.5.0`（另有 `latest`）
 - **GitHub**：<https://github.com/king-joker-z/huangguo-collector>
 - **Actions**：推送到 `main` 自动构建并推送 Docker Hub，也可在 Actions 页手动 `Run workflow`
 
 ```sh
-docker pull jokermelove/huangguo-collector:1.4.3
+docker pull jokermelove/huangguo-collector:1.5.0
 ```
 
 ### 方式 A：极空间直接拉取镜像（推荐）
@@ -337,7 +351,7 @@ docker compose -f docker-compose.zspace.yml up -d
 本机有 Docker 时：
 
 ```sh
-docker build --platform linux/amd64 -t jokermelove/huangguo-collector:1.4.3 .
+docker build --platform linux/amd64 -t jokermelove/huangguo-collector:1.5.0 .
 # 或
 docker compose up -d --build
 ```
@@ -383,6 +397,8 @@ docker exec huangguo-collector df -h /data /downloads
 ## 13. 免责声明
 
 本项目只做本地采集与媒体库整理，不托管、不分发任何内容。请自行确认内容合法性、年龄限制与站点服务条款；因使用产生的任何后果由使用者承担。
+
+
 
 
 

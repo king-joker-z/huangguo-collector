@@ -1,4 +1,4 @@
-"""定时全量扫库调度器。"""
+﻿"""定时全量扫库调度器。"""
 from __future__ import annotations
 
 import threading
@@ -144,7 +144,7 @@ class Scheduler:
             due = parse_datetime(schedule.get("next_run_at"))
             if due is None or due > now:
                 continue
-            modules = schedule.get("modules") or ["original", "duanju", "manju"]
+            modules = schedule.get("modules") or ["original", "duanju", "manju", "yeguo"]
             started, message = self.scan.start(modules, details=bool(schedule.get("details", 1)), refresh=False)
             if not started:
                 return
@@ -165,7 +165,7 @@ class Scheduler:
         schedule = self.db.get_schedule(schedule_id)
         if not schedule:
             return False, "定时任务不存在"
-        modules = schedule.get("modules") or ["original", "duanju", "manju"]
+        modules = schedule.get("modules") or ["original", "duanju", "manju", "yeguo"]
         started, message = self.scan.start(modules, details=bool(schedule.get("details", 1)), refresh=False)
         if not started:
             return False, message
@@ -180,3 +180,4 @@ class Scheduler:
         with self.lock:
             self.active_schedule_id = int(schedule_id)
         return True, "已开始执行"
+

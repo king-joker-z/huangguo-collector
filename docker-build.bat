@@ -1,8 +1,8 @@
 ﻿@echo off
 chcp 65001 >nul
 cd /d "%~dp0"
-set IMAGE=jokermelove/huangguo-collector:1.4.3
-set TAR=huangguo-collector-1.4.3.tar
+set IMAGE=jokermelove/huangguo-collector:1.5.0
+set TAR=huangguo-collector-1.5.0.tar
 
 echo Building %IMAGE% ...
 docker build --platform linux/amd64 -t %IMAGE% .
@@ -17,6 +17,7 @@ docker save %IMAGE% -o %TAR%
 echo Done.
 echo Import on NAS: docker load -i %TAR%
 pause
+
 
 
 

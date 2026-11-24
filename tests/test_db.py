@@ -74,6 +74,56 @@ class DatabaseStatsTests(unittest.TestCase):
         self.assertEqual(stats["episodes_done"], 1)
         self.assertEqual(stats["status"]["partial"], 1)
 
+    def test_same_title_keeps_more_episodes(self):
+        def make(site_id, source, module, total):
+            card = {
+                "site_id": site_id,
+                "source": source,
+                "module": module,
+                "title": "同名测试剧",
+                "url": "https://example/video/" + site_id,
+                "cover_url": "",
+                "score": 0,
+                "total_ep": total,
+                "views": "",
+                "tags": [],
+                "badges": [],
+            }
+            drama_id, _, _ = self.db.upsert_card(card)
+            detail = {
+                "title": "同名测试剧",
+                "description": "x",
+                "cover_url": "",
+                "score": 0,
+                "total_ep": total,
+                "tags": [],
+                "episodes": [
+                    {"ep": ep, "title": f"第{ep}集", "duration": 60}
+                    for ep in range(1, total + 1)
+                ],
+            }
+            self.db.apply_detail(site_id, detail)
+            return drama_id
+
+        huangguo_id = make("10010", "huangguo", "duanju", 5)
+        yeguo_id = make("yeguo_10010", "yeguo", "yeguo", 10)
+
+        huangguo = self.db.get_drama(huangguo_id)
+        yeguo = self.db.get_drama(yeguo_id)
+        self.assertEqual(huangguo["is_duplicate"], 1)
+        self.assertEqual(huangguo["duplicate_of"], yeguo_id)
+        self.assertEqual(yeguo["is_duplicate"], 0)
+        self.assertEqual(self.db.list_dramas()["total"], 1)
+        self.assertEqual(self.db.stats(ttl=0)["duplicates"], 1)
+
+        # 红果版本更新到 12 集后应重新成为主版本
+        make("10010", "huangguo", "duanju", 12)
+        huangguo = self.db.get_drama(huangguo_id)
+        yeguo = self.db.get_drama(yeguo_id)
+        self.assertEqual(huangguo["is_duplicate"], 0)
+        self.assertEqual(yeguo["is_duplicate"], 1)
+        self.assertEqual(yeguo["duplicate_of"], huangguo_id)
+
     def test_retry_failed_and_clear(self):
         card = {
             "site_id": "10002",

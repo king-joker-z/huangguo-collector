@@ -1,4 +1,4 @@
-"""全局路径与默认配置。"""
+﻿"""全局路径与默认配置。"""
 from __future__ import annotations
 
 import os
@@ -7,7 +7,7 @@ from pathlib import Path
 APP_DIR = Path(__file__).resolve().parent
 ROOT_DIR = APP_DIR.parent
 WEB_DIR = ROOT_DIR / "web"
-VERSION = "1.4.3"
+VERSION = "1.5.0"
 DATA_DIR = Path(os.environ.get("HUANGGUO_DATA_DIR") or (ROOT_DIR / "data")).expanduser()
 COVERS_DIR = DATA_DIR / "covers"
 EPISODE_COVERS_DIR = COVERS_DIR / "episodes"
@@ -20,26 +20,41 @@ for _d in (DATA_DIR, COVERS_DIR, EPISODE_COVERS_DIR, TMP_DIR, LOG_DIR):
 DB_PATH = DATA_DIR / "huangguo.db"
 
 SITE_BASE = "https://huangguoai.com"
+YEGUO_BASE = "https://yeguodj.com"
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
+
+SOURCES = {
+    "huangguo": {"label": "黄果", "base": SITE_BASE},
+    "yeguo": {"label": "野果", "base": YEGUO_BASE},
+}
 
 MODULES = {
     "original": {
         "label": "原创",
         "base": "/original/",
         "desc": "黄果原创",
+        "source": "huangguo",
     },
     "duanju": {
         "label": "短剧",
         "base": "/ai-duanju/",
         "desc": "AI 短剧",
+        "source": "huangguo",
     },
     "manju": {
         "label": "漫剧",
         "base": "/ai-manju/",
         "desc": "AI 漫剧",
+        "source": "huangguo",
+    },
+    "yeguo": {
+        "label": "野果短剧",
+        "base": "/explore/drama/",
+        "desc": "野果短剧",
+        "source": "yeguo",
     },
 }
 
@@ -73,3 +88,4 @@ def env_flag(name: str, default: bool = False) -> bool:
     if v is None:
         return default
     return v.strip().lower() in {"1", "true", "yes", "on"}
+

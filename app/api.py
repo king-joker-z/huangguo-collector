@@ -11,9 +11,9 @@ from fastapi import APIRouter, Body, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
 
 from . import nfo
-from .config import MODULES, SITE_BASE, VERSION
+from .config import MODULES, VERSION
 from .db import now_str
-from .runtime import covers, db, downloads, hls, scan, scheduler, scraper, settings
+from .runtime import covers, db, downloads, hls, scan, scheduler, scraper, scrapers, settings
 from .scheduler import format_datetime, next_run_at
 from .scraper import ScrapeError
 
@@ -44,11 +44,13 @@ def _ensure_episodes(drama_id: int) -> dict:
     total = int(row.get("total_ep") or 0)
     if episodes and len(episodes) >= total and row.get("detail_scraped_at"):
         return row
+    source = str(row.get("source") or "huangguo")
+    site_scraper = scrapers.get(source) or scraper
     try:
-        detail = scraper.fetch_detail(str(row["site_id"]))
+        detail = site_scraper.fetch_detail(str(row["site_id"]))
         db.apply_detail(str(row["site_id"]), detail)
         if not row.get("cover_path"):
-            scraper.save_cover(str(row["site_id"]), detail.get("cover_url") or "")
+            site_scraper.save_cover(str(row["site_id"]), detail.get("cover_url") or "")
     except ScrapeError as exc:
         fail(f"同步详情失败: {exc}", 502)
     fresh = db.get_drama(drama_id)
@@ -109,16 +111,18 @@ def health():
 
 
 @router.get("/site-check")
-def site_check():
+def site_check(source: str = "huangguo"):
+    site_scraper = scrapers.get(source) or scraper
     started = time.perf_counter()
     try:
-        scraper.http.get_text(SITE_BASE + "/", timeout=15)
+        kwargs = {"timeout": 12}
+        site_scraper.http.get_bytes(site_scraper.check_url, **kwargs)
     except ScrapeError as exc:
         fail(f"站点连接失败: {exc}", 502)
     except Exception as exc:
         fail(f"站点连接失败: {exc}", 502)
     latency = int((time.perf_counter() - started) * 1000)
-    return ok(latency_ms=latency, message=f"站点连接正常 · {latency}ms")
+    return ok(latency_ms=latency, source=source, message=f"站点连接正常 · {latency}ms")
 
 
 @router.get("/stats")
@@ -158,8 +162,13 @@ def list_dramas(
     score_min: float = 0,
     year: int = 0,
     site_tag: str = "",
+    source: str = "",
+    include_duplicates: bool = False,
 ):
-    return ok(**db.list_dramas(module, q, status, tag, sort, page, per_page, score_min, year, site_tag))
+    return ok(**db.list_dramas(
+        module, q, status, tag, sort, page, per_page, score_min, year, site_tag,
+        source, include_duplicates,
+    ))
 
 
 @router.get("/dramas/{drama_id}")
@@ -180,10 +189,12 @@ def drama_detail(drama_id: int):
 @router.post("/dramas/{drama_id}/scan")
 def scan_drama(drama_id: int):
     row = _drama_or_404(drama_id)
+    source = str(row.get("source") or "huangguo")
+    site_scraper = scrapers.get(source) or scraper
     try:
-        detail = scraper.fetch_detail(str(row["site_id"]))
+        detail = site_scraper.fetch_detail(str(row["site_id"]))
         db.apply_detail(str(row["site_id"]), detail)
-        scraper.save_cover(str(row["site_id"]), detail.get("cover_url") or "")
+        site_scraper.save_cover(str(row["site_id"]), detail.get("cover_url") or "")
         scan.auto_download(drama_id)
     except ScrapeError as exc:
         fail(f"同步失败: {exc}", 502)
@@ -613,7 +624,7 @@ def _schedule_payload(payload: dict) -> dict:
             weekdays.append(day)
     if not weekdays:
         fail("至少选择一天")
-    modules = [m for m in (payload.get("modules") or ["original", "duanju", "manju"]) if m in MODULES]
+    modules = [m for m in (payload.get("modules") or ["original", "duanju", "manju", "yeguo"]) if m in MODULES]
     if not modules:
         fail("至少选择一个模块")
     return {
@@ -712,6 +723,7 @@ def watch(drama_id: int, ep: int):
 @router.get("/stream")
 def stream(request: Request, u: str = Query(...), t: str = Query(...)):
     return hls.stream(u, t, request.headers.get("range", ""))
+
 
 
 

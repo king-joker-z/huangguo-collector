@@ -1,4 +1,4 @@
-﻿/* 黄果媒体库 · 前端（无构建依赖） */
+/* 黄果媒体库 · 前端（无构建依赖） */
 (() => {
   'use strict';
 
@@ -12,6 +12,7 @@
     { key: 'original', label: '原创', icon: '◆' },
     { key: 'duanju', label: '短剧', icon: '▶' },
     { key: 'manju', label: '漫剧', icon: '✦' },
+    { key: 'yeguo', label: '野果短剧', icon: '🍑' },
   ];
   const STATUSES = [
     { key: 'all', label: '全部', cls: '' },
@@ -254,7 +255,7 @@
     if (state.health) {
       const ok = state.health.ffmpeg;
       $('#health-dot').style.background = ok ? 'var(--ok)' : 'var(--accent)';
-      $('#health-text').textContent = ok ? `v1.4.3 · ${state.health.workers || 0} 路下载` : 'ffmpeg 未就绪';
+      $('#health-text').textContent = ok ? `v1.5.0 · ${state.health.workers || 0} 路下载` : 'ffmpeg 未就绪';
     }
   }
 
@@ -267,10 +268,12 @@
 
     const byModule = (state.stats && state.stats.by_module) || {};
     const cross = (state.stats && state.stats.cross_listed) || 0;
+    const duplicates = (state.stats && state.stats.duplicates) || 0;
     $('#module-list').innerHTML = MODULES.map((mod) => `
       <button class="smod ${state.module === mod.key ? 'on' : ''}" data-action="set-module" data-module="${mod.key}">
         <span class="ic">${mod.icon}</span><span>${mod.label}</span><i>${byModule[mod.key] || 0}</i>
-      </button>`).join('') + (cross ? `<div class="side-note">跨模块 ${cross} 部同时收录</div>` : '');
+      </button>`).join('') + (cross ? `<div class="side-note">跨模块 ${cross} 部同时收录</div>` : '') +
+      (duplicates ? `<div class="side-note">同名合并 ${duplicates} 部</div>` : '');
 
     renderTagList();
     updateSidebarCounts();
@@ -524,7 +527,7 @@
       <div class="cover">
         ${coverHTML(item)}
         <div class="cover-top">
-          <span class="code">#${h(item.site_id)}</span>
+          <span class="code">#${h(item.raw_site_id || item.site_id)}</span>
           ${item.score ? `<span class="score">${Number(item.score).toFixed(1)}<span>分</span></span>` : ''}
         </div>
         <div class="check" data-action="toggle-select" data-id="${item.id}"></div>
@@ -649,6 +652,9 @@
     const moduleText = ((d.module_labels && d.module_labels.length) ? d.module_labels : [d.module_label || moduleLabel(d.module)]).join(' · ');
     $('#view').innerHTML = `
       <a class="detail-back" href="#/${state.module === 'all' ? 'library' : 'module/' + state.module}">← 返回列表</a>
+      ${d.is_duplicate && d.duplicate_preferred ? `<div class="merge-banner">同名剧已保留集数更多的版本：
+        <a href="#/drama/${d.duplicate_preferred.id}">${h(d.duplicate_preferred.title)}（${d.duplicate_preferred.total_ep} 集）</a>
+        ，当前条目已从媒体库隐藏，文件不会删除。</div>` : ''}
       <div class="detail-hero">
         <div class="detail-cover">
           ${coverHTML(d)}
@@ -672,7 +678,7 @@
             <span>播放 <b>${h(d.views || '—')}</b></span>
             <span>单集 <b>${h(d.duration_text || '—')}</b></span>
             <span>年份 <b>${year || '—'}</b></span>
-            <span>出品 <b>${h(d.author || '黄果短剧')}</b></span>
+            <span>出品 <b>${h(d.author || (d.source === 'yeguo' ? '野果短剧' : '黄果短剧'))}</b></span>
           </div>
           <div class="detail-tags">
             ${siteTags.map((t) => `<span class="chip tag">${h(t)}</span>`).join('')}
@@ -1025,7 +1031,7 @@
     const editing = !!schedule;
     const current = schedule || {
       name: '每日全量扫库', time: '03:00', weekdays: [0, 1, 2, 3, 4, 5, 6],
-      modules: ['original', 'duanju', 'manju'], details: 1, enabled: 1,
+      modules: ['original', 'duanju', 'manju', 'yeguo'], details: 1, enabled: 1,
     };
     const days = new Set((current.weekdays || []).map(Number));
     const modules = new Set(current.modules || []);
@@ -1145,9 +1151,12 @@
               <div class="health-item"><span>下载线程</span><b>${health.workers || 0} 路</b></div>
               <div class="health-item"><span>磁盘剩余</span><b>${fmtBytes(health.disk_free || 0)}</b></div>
               <div class="health-item"><span>媒体库占用</span><b>${fmtBytes((state.stats && state.stats.storage_bytes) || 0)}</b></div>
-              <div class="health-item"><span>服务版本</span><b>${h(health.version || '1.4.3')}</b></div>
+              <div class="health-item"><span>服务版本</span><b>${h(health.version || '1.5.0')}</b></div>
             </div>
-            <button class="btn sm" data-action="site-check" style="margin-top:10px">测试站点连接</button>
+            <div style="display:flex;gap:6px;margin-top:10px">
+              <button class="btn sm" data-action="site-check" data-source="huangguo">测试黄果</button>
+              <button class="btn sm" data-action="site-check" data-source="yeguo">测试野果</button>
+            </div>
             <div class="hint" id="site-check-result"></div>
           </div>
           <div class="panel" style="margin-top:14px">
@@ -1277,11 +1286,12 @@
           <label class="check-card"><input type="checkbox" value="original" class="scan-module" checked><span class="name">原创</span><span class="desc">黄果原创</span></label>
           <label class="check-card"><input type="checkbox" value="duanju" class="scan-module" checked><span class="name">短剧</span><span class="desc">AI 短剧</span></label>
           <label class="check-card"><input type="checkbox" value="manju" class="scan-module" checked><span class="name">漫剧</span><span class="desc">AI 漫剧</span></label>
+          <label class="check-card"><input type="checkbox" value="yeguo" class="scan-module" checked><span class="name">野果短剧</span><span class="desc">yeguodj.com</span></label>
         </div>
         <div class="field"><label>采集页数（留空 = 全部）</label><input type="number" id="scan-pages" min="1" placeholder="例如 3，只采前 3 页"></div>
         <label class="checkbox-line" style="margin-bottom:7px"><input type="checkbox" id="scan-details" checked> 同步每部剧的详情与分集（下载必需）</label>
         <label class="checkbox-line" style="margin-bottom:12px"><input type="checkbox" id="scan-refresh"> 强制刷新已有详情</label>
-        <div class="scan-note">每个模块会扫「最近更新 / 当前热播 / 精选推荐」三个列表（原创仅一个），共 150+ 页；去重后约 1800+ 部。详情按 6 并发约 3–8 分钟。重复扫描只同步新增/有变化的剧。</div>
+        <div class="scan-note">黄果每个模块扫「最近更新 / 当前热播 / 精选推荐」，野果扫探索列表（约 75 页 / 1500 部）。同名剧只保留集数最多的版本。首次全量约 5–12 分钟。</div>
       </div>
       <div class="mfoot"><button class="btn ghost" data-close>取消</button><button class="btn pri" id="scan-start">开始采集</button></div>
     `);
@@ -1988,10 +1998,11 @@
         break;
       case 'site-check': {
         el.disabled = true;
+        const source = el.dataset.source || 'huangguo';
         const result = $('#site-check-result');
         if (result) result.textContent = '正在连接站点…';
         try {
-          const res = await api('/site-check');
+          const res = await api(`/site-check?source=${encodeURIComponent(source)}`);
           if (result) result.textContent = res.message || `站点连接正常 · ${res.latency_ms}ms`;
           toast(res.message || '站点连接正常', 'ok');
         } catch (err) {
@@ -2162,6 +2173,7 @@
 
   boot();
 })();
+
 
 
 

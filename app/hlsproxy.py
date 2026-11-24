@@ -17,15 +17,27 @@ from .db import Database
 from .scraper import Scraper, ScrapeError
 from .settings import Settings
 
-ALLOWED_SUFFIXES = (".qnlycc.cn", ".tjyyjk.cn", ".huangguoai.com")
+ALLOWED_SUFFIXES = (
+    ".qnlycc.cn",
+    ".tjyyjk.cn",
+    ".huangguoai.com",
+    ".micgqv.cn",
+    ".ucjosl.cn",
+    ".mkimfs.cn",
+    ".yeguodj.com",
+)
 URI_RE = re.compile(r'URI="([^"]+)"')
 
 
 class HlsProxy:
-    def __init__(self, db: Database, settings: Settings, scraper: Scraper) -> None:
+    def __init__(self, db: Database, settings: Settings, scrapers) -> None:
         self.db = db
         self.settings = settings
-        self.scraper = scraper
+        if isinstance(scrapers, dict):
+            self.scrapers = scrapers
+        else:
+            self.scrapers = {"huangguo": scrapers} if scrapers is not None else {}
+        self.scraper = self.scrapers.get("huangguo")
         self.secret = secrets.token_bytes(24)
         self.cache: dict[tuple[str, int], tuple[float, str, dict]] = {}
         # 每个分片 token 对应自己的 CDN 鉴权头，避免并发播放时串用其他集的 auth。
@@ -67,18 +79,22 @@ class HlsProxy:
         if not drama:
             raise ScrapeError("剧集不存在")
         site_id = str(drama["site_id"])
+        source = str(drama["source"] or "huangguo") if "source" in drama.keys() else "huangguo"
+        scraper = self.scrapers.get(source) or self.scraper
+        if scraper is None:
+            raise ScrapeError(f"未配置站点采集器: {source}")
         key = (site_id, int(ep))
         with self.lock:
             cached = self.cache.get(key)
             if cached and cached[0] > time.time():
                 return cached[1]
 
-        payload = self.scraper.get_playback(site_id, int(ep))
+        payload = scraper.get_playback(site_id, int(ep))
         url = (payload.get("streams") or {}).get("main") or ""
         if not url:
             raise ScrapeError("没有视频流")
-        headers = Scraper.cdn_headers(payload)
-        text = self.scraper.http.get_text(url, headers=headers)
+        headers = scraper.cdn_headers(payload) if hasattr(scraper, "cdn_headers") else Scraper.cdn_headers(payload)
+        text = scraper.http.get_text(url, headers=headers)
 
         base = url
         out_lines: list[str] = []

@@ -27,10 +27,14 @@ class CanceledError(RuntimeError):
 
 
 class DownloadManager:
-    def __init__(self, db: Database, settings: Settings, scraper: Scraper) -> None:
+    def __init__(self, db: Database, settings: Settings, scrapers) -> None:
         self.db = db
         self.settings = settings
-        self.scraper = scraper
+        if isinstance(scrapers, dict):
+            self.scrapers = scrapers
+        else:
+            self.scrapers = {"huangguo": scrapers} if scrapers is not None else {}
+        self.scraper = self.scrapers.get("huangguo")
         self.queue: queue.Queue[int] = queue.Queue()
         self.lock = threading.RLock()
         self.procs: dict[int, subprocess.Popen] = {}
@@ -250,13 +254,17 @@ class DownloadManager:
 
     # ------------------------------------------------------------------ one file
     def _download_once(self, task_id: int, drama: dict, episode: dict, quality: str) -> None:
-        payload = self.scraper.get_playback(str(drama["site_id"]), int(episode["ep"]))
+        source = str(drama.get("source") or "huangguo")
+        scraper = self.scrapers.get(source) or self.scraper
+        if scraper is None:
+            raise ScrapeError(f"未配置站点采集器: {source}")
+        payload = scraper.get_playback(str(drama["site_id"]), int(episode["ep"]))
         streams = payload.get("streams") or {}
         use_hevc = quality == "hevc" and bool(streams.get("hevc"))
         url = streams.get("hevc") if use_hevc else streams.get("main")
         if not url:
             raise ScrapeError("没有可用的视频流")
-        headers = Scraper.cdn_headers(payload)
+        headers = scraper.cdn_headers(payload) if hasattr(scraper, "cdn_headers") else Scraper.cdn_headers(payload)
         header_text = "".join(f"{key}: {value}\r\n" for key, value in headers.items())
 
         target = nfo.episode_path(self.settings, drama, int(episode["ep"]))

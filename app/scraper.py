@@ -96,6 +96,8 @@ class Scraper:
         self.db = db
         self.settings = settings
         self.http = HttpClient(settings)
+        self.site_base = SITE_BASE
+        self.check_url = SITE_BASE + "/"
         self._image_crypto: tuple[bytes, bytes] | None = None
         self._image_crypto_lock = threading.Lock()
 
@@ -344,7 +346,7 @@ class Scraper:
             key, iv = FALLBACK_IMAGE_KEY, FALLBACK_IMAGE_IV
             try:
                 text = self.http.get_text(
-                    f"{SITE_BASE}/static/web/js/plugins/crypto-image-protocol.js"
+                    f"{self.site_base}/static/web/js/plugins/crypto-image-protocol.js"
                 )
                 match = re.search(r"CryptoImageProtocol\s*=\s*Object\.freeze\((\{.*?\})\)", text, re.S)
                 if match:
@@ -389,7 +391,7 @@ class Scraper:
         for candidate in candidates:
             try:
                 content, _ = self.http.get_bytes(
-                    candidate, headers={"Referer": SITE_BASE + "/", "Accept": "image/*,*/*"}
+                    candidate, headers={"Referer": self.site_base + "/", "Accept": "image/*,*/*"}
                 )
                 if content:
                     break
@@ -451,3 +453,4 @@ class Scraper:
         if cdn.get("app"):
             headers["x-cdn-app"] = str(cdn["app"])
         return headers
+

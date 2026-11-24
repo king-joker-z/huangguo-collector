@@ -21,14 +21,19 @@ TAB_VARIANTS = {
     "original": [("latest", "最近更新")],
     "duanju": [("latest", "最近更新"), ("hot", "当前热播"), ("random", "精选推荐")],
     "manju": [("latest", "最近更新"), ("hot", "当前热播"), ("random", "精选推荐")],
+    "yeguo": [("latest", "全部剧集")],
 }
 
 
 class ScanManager:
-    def __init__(self, db: Database, settings: Settings, scraper: Scraper, downloads=None) -> None:
+    def __init__(self, db: Database, settings: Settings, scrapers, downloads=None) -> None:
         self.db = db
         self.settings = settings
-        self.scraper = scraper
+        if isinstance(scrapers, dict):
+            self.scrapers = scrapers
+        else:
+            self.scrapers = {"huangguo": scrapers}
+        self.scraper = self.scrapers.get("huangguo")
         self.downloads = downloads
         self.lock = threading.RLock()
         self.cancel_event = threading.Event()
@@ -110,12 +115,17 @@ class ScanManager:
                 if self.cancel_event.is_set():
                     break
                 label = MODULES[module]["label"]
+                source = MODULES[module].get("source", "huangguo")
+                scraper = self.scrapers.get(source)
+                if scraper is None:
+                    self._error(f"{label} 未配置采集器")
+                    continue
                 tabs = TAB_VARIANTS.get(module, [("latest", "最近更新")])
                 self._update(module=module, module_label=label, message=f"读取「{label}」分页…")
                 tab_pages: list[tuple[str, str, int]] = []
                 try:
                     for tab, tab_label in tabs:
-                        pages = self.scraper.page_count(module, tab)
+                        pages = scraper.page_count(module, tab)
                         if max_pages:
                             pages = min(pages, max_pages)
                         tab_pages.append((tab, tab_label, pages))
@@ -141,7 +151,7 @@ class ScanManager:
                             message=f"「{label} · {tab_label}」{page}/{pages} 页"
                         )
                         try:
-                            cards, _ = self.scraper.fetch_listing_page(module, page, tab)
+                            cards, _ = scraper.fetch_listing_page(module, page, tab)
                         except ScrapeError as exc:
                             self._error(f"{label} {tab_label} 第{page}页: {exc}")
                             done_pages += 1
@@ -221,20 +231,27 @@ class ScanManager:
         row = self.db.get_drama(drama_id)
         if not row:
             return
-        detail = self.scraper.fetch_detail(str(row["site_id"]))
+        source = row["source"] if "source" in row.keys() else "huangguo"
+        scraper = self.scrapers.get(source) or self.scraper
+        if scraper is None:
+            raise RuntimeError(f"未配置站点采集器: {source}")
+        detail = scraper.fetch_detail(str(row["site_id"]))
         _, has_update = self.db.apply_detail(str(row["site_id"]), detail)
         if has_update:
             with self.lock:
                 self.job["updated_count"] += 1
         if refresh or not row["cover_path"]:
             try:
-                self.scraper.save_cover(str(row["site_id"]), detail.get("cover_url") or "")
+                scraper.save_cover(str(row["site_id"]), detail.get("cover_url") or "")
             except Exception:
                 pass
         self._auto_download(drama_id)
 
     def _auto_download(self, drama_id: int) -> None:
         if self.downloads is None or self.cancel_event.is_set():
+            return
+        row = self.db.get_drama(drama_id)
+        if row and int(row["is_duplicate"] or 0):
             return
         subscription = self.db.get_subscription(drama_id)
         if not subscription or not subscription["enabled"] or not subscription["auto_download"]:

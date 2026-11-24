@@ -389,6 +389,7 @@ body.modal-open { overflow: hidden; }
 .cbadge.module.original { color: #ff9b9f; border-color: rgba(255, 92, 122, .32); }
 .cbadge.module.duanju { color: #ffc978; border-color: rgba(255, 180, 84, .28); }
 .cbadge.module.manju { color: #c2b0ff; border-color: rgba(183, 156, 255, .3); }
+.cbadge.module.yeguo { color: #8fe3b0; border-color: rgba(61, 220, 151, .3); }
 .cbadge.ep { margin-left: auto; }
 .update-ribbon {
   position: absolute; left: 8px; top: 36px; z-index: 2;
@@ -489,6 +490,8 @@ body.modal-open { overflow: hidden; }
 /* ------------------------------------------------------------------- detail */
 .detail-back { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12.5px; margin-bottom: 14px; }
 .detail-back:hover { color: #fff; }
+.merge-banner { margin: 0 0 12px; padding: 9px 12px; border-radius: 9px; border: 1px solid rgba(255, 180, 84, .25); background: rgba(255, 180, 84, .07); color: #e8d4ae; font-size: 11.5px; line-height: 1.7; }
+.merge-banner a { color: #ffd28a; text-decoration: underline; }
 .detail-hero { display: grid; grid-template-columns: 250px minmax(0, 1fr) 280px; gap: 24px; align-items: start; }
 .detail-side { display: flex; flex-direction: column; gap: 10px; }
 .side-card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); padding: 13px 14px; }

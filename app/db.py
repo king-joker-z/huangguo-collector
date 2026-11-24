@@ -3,13 +3,15 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import sqlite3
 import threading
 import time
+import unicodedata
 from datetime import datetime
 from typing import Any, Iterable
 
-from .config import DB_PATH, MODULES
+from .config import DB_PATH, MODULES, SOURCES
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS dramas (
@@ -17,6 +19,10 @@ CREATE TABLE IF NOT EXISTS dramas (
     site_id TEXT NOT NULL UNIQUE,
     module TEXT NOT NULL,
     modules_json TEXT DEFAULT '[]',
+    source TEXT DEFAULT 'huangguo',
+    title_key TEXT DEFAULT '',
+    duplicate_of INTEGER DEFAULT 0,
+    is_duplicate INTEGER DEFAULT 0,
     title TEXT NOT NULL,
     url TEXT NOT NULL,
     cover_url TEXT DEFAULT '',
@@ -124,7 +130,7 @@ CREATE TABLE IF NOT EXISTS schedules (
     enabled INTEGER DEFAULT 1,
     time TEXT NOT NULL,
     weekdays TEXT DEFAULT '0,1,2,3,4,5,6',
-    modules_json TEXT DEFAULT '["original","duanju","manju"]',
+    modules_json TEXT DEFAULT '["original","duanju","manju","yeguo"]',
     details INTEGER DEFAULT 1,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
@@ -157,11 +163,17 @@ def now_str() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+def title_key(title: str) -> str:
+    """跨站点同名判断：全角转半角、去空白和标点、忽略大小写。"""
+    text = unicodedata.normalize("NFKC", str(title or "")).lower()
+    return re.sub(r"[\s\W_]+", "", text, flags=re.UNICODE)
+
+
 def json_dumps(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
-MODULE_ORDER = ("original", "duanju", "manju")
+MODULE_ORDER = ("original", "duanju", "manju", "yeguo")
 
 
 def ordered_modules(modules: Any) -> list[str]:
@@ -187,6 +199,14 @@ class Database:
             columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(dramas)")}
             if "modules_json" not in columns:
                 self.conn.execute("ALTER TABLE dramas ADD COLUMN modules_json TEXT DEFAULT '[]'")
+            if "source" not in columns:
+                self.conn.execute("ALTER TABLE dramas ADD COLUMN source TEXT DEFAULT 'huangguo'")
+            if "title_key" not in columns:
+                self.conn.execute("ALTER TABLE dramas ADD COLUMN title_key TEXT DEFAULT ''")
+            if "duplicate_of" not in columns:
+                self.conn.execute("ALTER TABLE dramas ADD COLUMN duplicate_of INTEGER DEFAULT 0")
+            if "is_duplicate" not in columns:
+                self.conn.execute("ALTER TABLE dramas ADD COLUMN is_duplicate INTEGER DEFAULT 0")
             episode_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(episodes)")}
             if "cover_url" not in episode_columns:
                 self.conn.execute("ALTER TABLE episodes ADD COLUMN cover_url TEXT DEFAULT ''")
@@ -196,7 +216,28 @@ class Database:
                 "UPDATE dramas SET modules_json=json_array(module) "
                 "WHERE modules_json IS NULL OR modules_json='' OR modules_json='[]'"
             )
+            self.conn.execute(
+                "UPDATE dramas SET source='huangguo' WHERE source IS NULL OR source=''"
+            )
+            rows = self.conn.execute(
+                "SELECT id,title FROM dramas WHERE title_key IS NULL OR title_key=''"
+            ).fetchall()
+            for row in rows:
+                self.conn.execute(
+                    "UPDATE dramas SET title_key=? WHERE id=?",
+                    (title_key(row["title"]), row["id"]),
+                )
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_dramas_source ON dramas(source)"
+            )
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_dramas_title_key ON dramas(title_key)"
+            )
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_dramas_duplicate ON dramas(is_duplicate)"
+            )
             self.conn.commit()
+            self.resolve_all_duplicates()
 
     # ------------------------------------------------------------------ basic
     def execute(self, sql: str, params: Iterable[Any] = ()) -> sqlite3.Cursor:
@@ -235,22 +276,27 @@ class Database:
     def upsert_card(self, card: dict) -> tuple[int, bool, bool]:
         """写入列表卡片。返回 (drama_id, is_new, has_update)。"""
         site_id = str(card["site_id"])
+        source = str(card.get("source") or "huangguo")
+        key = title_key(card.get("title") or "")
         total = int(card.get("total_ep") or 0)
         ts = now_str()
         with self.lock:
             row = self.conn.execute(
-                "SELECT id,total_ep,detail_scraped_at,module,modules_json FROM dramas WHERE site_id=?",
+                "SELECT id,total_ep,detail_scraped_at,module,modules_json,source,title_key "
+                "FROM dramas WHERE site_id=?",
                 (site_id,),
             ).fetchone()
             if row is None:
                 cur = self.conn.execute(
-                    """INSERT INTO dramas(site_id,module,modules_json,title,url,cover_url,score,total_ep,
+                    """INSERT INTO dramas(site_id,module,modules_json,source,title_key,title,url,cover_url,score,total_ep,
                        views,tags_json,badges_json,created_at,updated_at,last_scraped_at)
-                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         site_id,
                         card["module"],
                         json_dumps([card["module"]]),
+                        source,
+                        key,
                         card["title"],
                         card["url"],
                         card.get("cover_url", ""),
@@ -265,7 +311,9 @@ class Database:
                     ),
                 )
                 self.conn.commit()
-                return int(cur.lastrowid), True, False
+                drama_id = int(cur.lastrowid)
+                self.resolve_title_group(key)
+                return drama_id, True, False
 
             try:
                 modules = set(json.loads(row["modules_json"] or "[]"))
@@ -277,8 +325,9 @@ class Database:
             old_total = int(row["total_ep"] or 0)
             new_total = max(old_total, total)
             has_update = 1 if old_total > 0 and total > old_total else 0
+            old_key = str(row["title_key"] or "")
             self.conn.execute(
-                """UPDATE dramas SET module=?,modules_json=?,title=?,url=?,cover_url=?,score=?,
+                """UPDATE dramas SET module=?,modules_json=?,source=?,title_key=?,title=?,url=?,cover_url=?,score=?,
                    total_ep=?,views=?,tags_json=?,badges_json=?,
                    last_scraped_at=?,
                    prev_total_ep=CASE WHEN ?=1 THEN ? ELSE prev_total_ep END,
@@ -287,6 +336,8 @@ class Database:
                 (
                     primary,
                     json_dumps(ordered),
+                    source,
+                    key,
                     card["title"],
                     card["url"],
                     card.get("cover_url", ""),
@@ -303,6 +354,9 @@ class Database:
                 ),
             )
             self.conn.commit()
+            self.resolve_title_group(key)
+            if old_key and old_key != key:
+                self.resolve_title_group(old_key)
             return int(row["id"]), False, bool(has_update)
 
     def apply_detail(self, site_id: str, detail: dict) -> tuple[int, bool]:
@@ -310,29 +364,32 @@ class Database:
         ts = now_str()
         with self.lock:
             row = self.conn.execute(
-                "SELECT id,total_ep,detail_scraped_at FROM dramas WHERE site_id=?", (site_id,)
+                "SELECT id,total_ep,detail_scraped_at,title_key,title,views FROM dramas WHERE site_id=?", (site_id,)
             ).fetchone()
             if row is None:
                 raise KeyError(f"drama {site_id} not found")
             old_total = int(row["total_ep"] or 0)
+            old_key = str(row["title_key"] or "")
             new_total = max(old_total, int(detail.get("total_ep") or 0))
+            incoming_title = str(detail.get("title") or row["title"] or "")
+            key = title_key(incoming_title)
             has_update = old_total > 0 and int(detail.get("total_ep") or 0) > old_total
             self.conn.execute(
-                """UPDATE dramas SET title=?,description=?,cover_url=?,score=?,total_ep=?,
+                """UPDATE dramas SET title=?,title_key=?,description=?,cover_url=?,score=?,total_ep=?,
                    author=?,status_text=?,views=?,premiered=?,duration_text=?,category_text=?,
                    tags_json=?,year=?,updated_at=?,detail_scraped_at=?,
                    prev_total_ep=CASE WHEN ?=1 THEN ? ELSE prev_total_ep END,
                    has_update=CASE WHEN ?=1 THEN 1 ELSE has_update END
                    WHERE id=?""",
                 (
-                    detail.get("title") or "",
-                    detail.get("description") or "",
+                    incoming_title,
+                    key,                    detail.get("description") or "",
                     detail.get("cover_url") or "",
                     detail.get("score"),
                     new_total,
                     detail.get("author") or "",
                     detail.get("status_text") or "",
-                    detail.get("views") or "",
+                    detail.get("views") or row["views"] or "",
                     detail.get("premiered") or "",
                     detail.get("duration_text") or "",
                     detail.get("category_text") or "",
@@ -349,13 +406,14 @@ class Database:
             episodes = detail.get("episodes") or []
             for ep in episodes:
                 self.conn.execute(
-                    """INSERT INTO episodes(drama_id,ep,site_video_id,title,synopsis,duration)
-                       VALUES(?,?,?,?,?,?)
+                    """INSERT INTO episodes(drama_id,ep,site_video_id,title,synopsis,duration,cover_url)
+                       VALUES(?,?,?,?,?,?,?)
                        ON CONFLICT(drama_id,ep) DO UPDATE SET
                          site_video_id=CASE WHEN excluded.site_video_id<>'' THEN excluded.site_video_id ELSE episodes.site_video_id END,
                          title=CASE WHEN excluded.title<>'' THEN excluded.title ELSE episodes.title END,
                          synopsis=CASE WHEN excluded.synopsis<>'' THEN excluded.synopsis ELSE episodes.synopsis END,
-                         duration=CASE WHEN excluded.duration>0 THEN excluded.duration ELSE episodes.duration END""",
+                         duration=CASE WHEN excluded.duration>0 THEN excluded.duration ELSE episodes.duration END,
+                         cover_url=CASE WHEN excluded.cover_url<>'' THEN excluded.cover_url ELSE episodes.cover_url END""",
                     (
                         row["id"],
                         int(ep["ep"]),
@@ -363,10 +421,43 @@ class Database:
                         ep.get("title") or "",
                         ep.get("synopsis") or "",
                         int(ep.get("duration") or 0),
+                        ep.get("cover_url") or "",
                     ),
                 )
             self.conn.commit()
+            self.resolve_title_group(key)
+            if old_key and old_key != key:
+                self.resolve_title_group(old_key)
             return int(row["id"]), bool(has_update)
+
+    def resolve_title_group(self, key: str) -> None:
+        """同名跨站点去重：集数最多者为主版本，其他来源标记为重复。"""
+        if not key:
+            return
+        rows = self.query(
+            "SELECT id,source,total_ep FROM dramas WHERE title_key=? "
+            "ORDER BY total_ep DESC, id ASC",
+            (key,),
+        )
+        if not rows:
+            return
+        preferred = rows[0]
+        for row in rows:
+            is_dup = 1 if int(row["id"]) != int(preferred["id"]) else 0
+            dup_of = int(preferred["id"]) if is_dup else 0
+            self.execute(
+                "UPDATE dramas SET duplicate_of=?,is_duplicate=? "
+                "WHERE id=? AND (duplicate_of<>? OR is_duplicate<>?)",
+                (dup_of, is_dup, row["id"], dup_of, is_dup),
+            )
+
+    def resolve_all_duplicates(self) -> None:
+        rows = self.query(
+            "SELECT title_key FROM dramas WHERE title_key<>'' "
+            "GROUP BY title_key HAVING COUNT(*)>1"
+        )
+        for row in rows:
+            self.resolve_title_group(str(row["title_key"]))
 
     def mark_detail_error(self, site_id: str) -> None:
         self.execute("UPDATE dramas SET detail_scraped_at=? WHERE site_id=?", (now_str(), site_id))
@@ -542,6 +633,7 @@ class Database:
                  (SELECT COUNT(*) FROM episodes e WHERE e.drama_id=d.id) AS ep_rows,
                  (SELECT COUNT(*) FROM tasks t WHERE t.drama_id=d.id AND t.state IN ('queued','downloading')) AS active_tasks
                FROM subscriptions s JOIN dramas d ON d.id=s.drama_id
+               WHERE d.is_duplicate=0
                ORDER BY d.has_update DESC, s.created_at DESC"""
         )
         items = [self._drama_dict(r) for r in rows]
@@ -699,9 +791,16 @@ class Database:
         score_min: float = 0,
         year: int = 0,
         site_tag: str = "",
+        source: str = "",
+        include_duplicates: bool = False,
     ) -> dict:
         where: list[str] = []
         params: list[Any] = []
+        if not include_duplicates:
+            where.append("x.is_duplicate=0")
+        if source in SOURCES:
+            where.append("x.source=?")
+            params.append(source)
         if module in MODULES:
             where.append("EXISTS (SELECT 1 FROM json_each(x.modules_json) jm WHERE jm.value=?)")
             params.append(module)
@@ -803,6 +902,15 @@ class Database:
                 e["thumb"] = ""
         data["episodes"] = eps
         data["tags"] = self.tags_for_drama(drama_id)
+        if data.get("is_duplicate") and data.get("duplicate_of"):
+            preferred = self.get_drama(int(data["duplicate_of"]))
+            if preferred:
+                data["duplicate_preferred"] = {
+                    "id": int(preferred["id"]),
+                    "title": preferred["title"],
+                    "total_ep": int(preferred["total_ep"] or 0),
+                    "source": preferred["source"] or "huangguo",
+                }
         data["tasks"] = [
             dict(t) for t in self.query(
                 "SELECT * FROM tasks WHERE drama_id=? AND state IN ('queued','downloading')", (drama_id,)
@@ -829,6 +937,14 @@ class Database:
         d["module"] = d.get("module") or d["modules"][0]
         d["module_label"] = MODULES.get(d.get("module", ""), {}).get("label", d.get("module", ""))
         d["module_labels"] = [MODULES.get(m, {}).get("label", m) for m in d["modules"]]
+        d["source"] = d.get("source") or "huangguo"
+        d["source_label"] = SOURCES.get(d["source"], {}).get("label", d["source"])
+        raw_site_id = str(d.get("site_id") or "")
+        if d["source"] == "yeguo" and raw_site_id.startswith("yeguo_"):
+            raw_site_id = raw_site_id[len("yeguo_"):]
+        d["raw_site_id"] = raw_site_id
+        d["is_duplicate"] = bool(d.get("is_duplicate"))
+        d["duplicate_of"] = int(d.get("duplicate_of") or 0)
         d["subscribed"] = bool(d.pop("subscribed_flag", 0))
         d["sub_quality"] = d.pop("sub_quality", "") or ""
         d["sub_auto"] = bool(d.pop("sub_auto", 1))
@@ -853,7 +969,7 @@ class Database:
                 (SELECT COUNT(*) FROM subscriptions s WHERE s.drama_id=d.id AND s.enabled=1) AS subscribed_flag,
                 (SELECT s.quality FROM subscriptions s WHERE s.drama_id=d.id LIMIT 1) AS sub_quality,
                 (SELECT s.auto_download FROM subscriptions s WHERE s.drama_id=d.id LIMIT 1) AS sub_auto
-               FROM dramas d WHERE d.has_update=1
+               FROM dramas d WHERE d.has_update=1 AND d.is_duplicate=0
                ORDER BY d.updated_at DESC LIMIT ?""",
             (limit,),
         )
@@ -870,12 +986,20 @@ class Database:
                 cached = self._stats_cache
                 if cached and now_mono - cached[0] < ttl:
                     return copy.deepcopy(cached[1])
-        total = int(self.query_one("SELECT COUNT(*) n FROM dramas")["n"])
+        total = int(self.query_one("SELECT COUNT(*) n FROM dramas WHERE is_duplicate=0")["n"])
         by_module = {
             r["module"]: int(r["n"])
             for r in self.query(
                 "SELECT jm.value AS module, COUNT(*) AS n "
-                "FROM dramas d, json_each(d.modules_json) jm GROUP BY jm.value"
+                "FROM dramas d, json_each(d.modules_json) jm "
+                "WHERE d.is_duplicate=0 GROUP BY jm.value"
+            )
+        }
+        by_source = {
+            r["source"]: int(r["n"])
+            for r in self.query(
+                "SELECT source, COUNT(*) AS n FROM dramas "
+                "WHERE is_duplicate=0 GROUP BY source"
             )
         }
         status_row = self.query_one(
@@ -891,7 +1015,7 @@ class Database:
                  SELECT d.id,d.total_ep,d.has_update,d.favorite,
                    (SELECT COUNT(*) FROM episodes e WHERE e.drama_id=d.id AND e.state='done') AS done_ep,
                    (SELECT COUNT(*) FROM tasks t WHERE t.drama_id=d.id AND t.state IN ('queued','downloading')) AS active_tasks
-                 FROM dramas d
+                 FROM dramas d WHERE d.is_duplicate=0
                ) x"""
         )
         status = {
@@ -906,21 +1030,34 @@ class Database:
         done = status["done"]
         partial = status["partial"]
         updates = status["update"]
-        episodes_done = int(self.query_one("SELECT COUNT(*) n FROM episodes WHERE state='done'")["n"])
-        episodes_total = int(self.query_one("SELECT COUNT(*) n FROM episodes")["n"])
+        episodes_done = int(self.query_one(
+            "SELECT COUNT(*) n FROM episodes e JOIN dramas d ON d.id=e.drama_id "
+            "WHERE e.state='done' AND d.is_duplicate=0"
+        )["n"])
+        episodes_total = int(self.query_one(
+            "SELECT COUNT(*) n FROM episodes e JOIN dramas d ON d.id=e.drama_id "
+            "WHERE d.is_duplicate=0"
+        )["n"])
         storage = int(self.query_one("SELECT COALESCE(SUM(file_size),0) n FROM episodes WHERE state='done'")["n"])
         active = int(self.query_one("SELECT COUNT(*) n FROM tasks WHERE state IN ('queued','downloading')")["n"])
-        subscribed = int(self.query_one("SELECT COUNT(*) n FROM subscriptions WHERE enabled=1")["n"])
+        subscribed = int(self.query_one(
+            "SELECT COUNT(*) n FROM subscriptions s JOIN dramas d ON d.id=s.drama_id "
+            "WHERE s.enabled=1 AND d.is_duplicate=0"
+        )["n"])
         sub_updates = int(self.query_one(
-            "SELECT COUNT(*) n FROM dramas d WHERE d.has_update=1 AND EXISTS "
+            "SELECT COUNT(*) n FROM dramas d WHERE d.has_update=1 AND d.is_duplicate=0 AND EXISTS "
             "(SELECT 1 FROM subscriptions s WHERE s.drama_id=d.id AND s.enabled=1)"
+        )["n"])
+        duplicates = int(self.query_one(
+            "SELECT COUNT(*) n FROM dramas WHERE is_duplicate=1"
         )["n"])
         status["subscribed"] = subscribed
         last_row = self.query_one("SELECT MAX(last_scraped_at) AS t FROM dramas")
         years = [
             {"year": int(r["year"]), "count": int(r["n"])}
             for r in self.query(
-                "SELECT year, COUNT(*) n FROM dramas WHERE year IS NOT NULL GROUP BY year ORDER BY year DESC LIMIT 12"
+                "SELECT year, COUNT(*) n FROM dramas WHERE year IS NOT NULL AND is_duplicate=0 "
+                "GROUP BY year ORDER BY year DESC LIMIT 12"
             )
         ]
         site_tags = [
@@ -928,13 +1065,15 @@ class Database:
             for r in self.query(
                 """SELECT je.value AS name, COUNT(*) AS count
                    FROM dramas d, json_each(d.tags_json) je
-                   WHERE d.tags_json IS NOT NULL AND d.tags_json <> ''
+                   WHERE d.tags_json IS NOT NULL AND d.tags_json <> '' AND d.is_duplicate=0
                    GROUP BY je.value ORDER BY count DESC, je.value LIMIT 48"""
             )
         ]
         result = {
             "total": total,
             "by_module": by_module,
+            "by_source": by_source,
+            "duplicates": duplicates,
             "cross_listed": max(0, sum(by_module.values()) - total),
             "status": status,
             "done": done,
@@ -964,3 +1103,4 @@ class Database:
             (limit,),
         )
         return [dict(r) for r in rows]
+
