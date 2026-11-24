@@ -142,6 +142,25 @@ class DownloadManager:
         )
         return sum(1 for row in rows if self.cancel(int(row["id"])))
 
+    def retry_failed(self) -> dict:
+        """把所有 failed 任务重新入队，保留原任务画质。"""
+        rows = self.db.query(
+            "SELECT drama_id,ep,quality FROM tasks WHERE state='failed' ORDER BY id"
+        )
+        queued = skipped = 0
+        for row in rows:
+            task_id = self.db.upsert_task(
+                int(row["drama_id"]), int(row["ep"]), str(row["quality"] or "hevc"), force=True
+            )
+            if task_id is None:
+                skipped += 1
+                continue
+            self.canceled.discard(task_id)
+            self.db.set_episode_state(int(row["drama_id"]), int(row["ep"]), "queued")
+            self.queue.put(task_id)
+            queued += 1
+        return {"queued": queued, "skipped": skipped}
+
     # --------------------------------------------------------------------- worker
     def _worker_loop(self) -> None:
         while not self.stop_event.is_set():

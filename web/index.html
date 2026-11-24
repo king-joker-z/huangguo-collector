@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="dark">
   <title>黄果媒体库 · Huangguo Library</title>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/static/style.css?v=2">
+  <link rel="stylesheet" href="/static/style.css?v=1.4.3">
 </head>
 <body>
   <header class="topbar">
@@ -69,7 +69,7 @@
           <div class="storage-bar"><span id="storage-fill"></span></div>
           <div class="storage-bottom"><span id="storage-free">磁盘剩余 --</span><span id="storage-eps">0 集</span></div>
         </div>
-        <div class="side-version"><span class="dot online" id="health-dot"></span><span id="health-text">v1.4.2 · 本地服务</span></div>
+        <div class="side-version"><span class="dot online" id="health-dot"></span><span id="health-text">v1.4.3 · 本地服务</span></div>
       </div>
     </aside>
 
@@ -87,6 +87,12 @@
         <div class="scan-progress"><span id="cover-fill"></span></div>
         <div class="scan-counter" id="cover-counter">0 / 0</div>
       </div>
+      <div class="failure-banner hidden" id="failure-banner">
+        <span class="failure-icon">!</span>
+        <span>有 <b id="failure-count">0</b> 个下载失败</span>
+        <a class="btn sm" href="#/downloads">查看并重试</a>
+        <button class="failure-close" id="failure-close" title="关闭">×</button>
+      </div>
       <div id="view"></div>
     </main>
   </div>
@@ -97,9 +103,11 @@
   <div id="modal-root"></div>
 
   <script src="/static/hls.min.js"></script>
-  <script src="/static/app.js?v=2"></script>
+  <script src="/static/app.js?v=1.4.3"></script>
 </body>
 </html>
+
+
 
 
 

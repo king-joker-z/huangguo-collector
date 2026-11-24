@@ -28,14 +28,18 @@
 
 > 仅用于个人媒体库整理。内容为成人向 AI 短剧（18+），请遵守站点条款与当地法律法规，不要公开传播。
 
-## 1.4.2 优化
+## 1.4.3 优化与易用性
 
 - HLS 播放代理按分片 token 隔离 CDN 鉴权头，避免同时播放/下载多集时串用 `x-cdn-auth`。
 - `/api/activity` 使用 2 秒统计缓存；补充 SQLite 热路径索引，降低 1.6 秒轮询开销。
 - 下载 HEVC 失败时第 2 次起自动回退 H.264；ffmpeg 增加 120 秒读超时，失败原因写入容器日志。
 - 全量扫描跨模块按 `drama_id` 去重详情抓取，减少原创/短剧/漫剧交叉收录的重复请求。
 - 容器/Linux 下点“打开目录”不再 500，改为提示宿主机路径。
-- 新增 12 个单测，并接入 GitHub Actions：测试通过才构建镜像。
+- 下载失败全局提示 + 一键重试全部失败 + 清理失败记录 + 失败原因弹窗。
+- 首次使用空库改为三步引导：扫描、设置下载目录、创建定时任务。
+- 设置页新增“测试站点连接”，直接显示延迟或具体错误。
+- 前端静态资源按版本号刷新，升级后不再需要手动 `Ctrl+F5`。
+- 新增 13 个单测，并接入 GitHub Actions：测试通过才构建镜像。
 
 ---
 
@@ -270,7 +274,10 @@ huangguo-collector/
 | POST | `/api/fs/mkdir` | 在指定目录下新建文件夹 |
 | GET | `/api/covers` | 集封面补全进度 |
 | POST | `/api/covers/backfill` | `{drama_ids}` 或 `{all:true}` 补全集封面 |
+| GET | `/api/site-check` | 测试站点连通性与延迟 |
 | GET | `/api/tasks` | 队列与历史任务 |
+| POST | `/api/tasks/retry-failed` | 重试全部失败任务 |
+| POST | `/api/tasks/clear` | `{states}` 清理完成/取消/失败记录 |
 | GET | `/api/watch/{id}/{ep}` | 重写后的 m3u8（站内观看） |
 | GET | `/api/stream?u=&t=` | 分片/密钥代理（HMAC + 域名白名单） |
 | GET/PUT | `/api/settings` | 设置 |
@@ -299,12 +306,12 @@ huangguo-collector/
 
 镜像已发布到 Docker Hub（`linux/amd64`，适配 Z4 Pro）：
 
-- **镜像**：`jokermelove/huangguo-collector:1.4.2`（另有 `latest`）
+- **镜像**：`jokermelove/huangguo-collector:1.4.3`（另有 `latest`）
 - **GitHub**：<https://github.com/king-joker-z/huangguo-collector>
 - **Actions**：推送到 `main` 自动构建并推送 Docker Hub，也可在 Actions 页手动 `Run workflow`
 
 ```sh
-docker pull jokermelove/huangguo-collector:1.4.2
+docker pull jokermelove/huangguo-collector:1.4.3
 ```
 
 ### 方式 A：极空间直接拉取镜像（推荐）
@@ -330,7 +337,7 @@ docker compose -f docker-compose.zspace.yml up -d
 本机有 Docker 时：
 
 ```sh
-docker build --platform linux/amd64 -t jokermelove/huangguo-collector:1.4.2 .
+docker build --platform linux/amd64 -t jokermelove/huangguo-collector:1.4.3 .
 # 或
 docker compose up -d --build
 ```
@@ -376,5 +383,6 @@ docker exec huangguo-collector df -h /data /downloads
 ## 13. 免责声明
 
 本项目只做本地采集与媒体库整理，不托管、不分发任何内容。请自行确认内容合法性、年龄限制与站点服务条款；因使用产生的任何后果由使用者承担。
+
 
 

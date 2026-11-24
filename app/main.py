@@ -8,7 +8,7 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .api import router
-from .config import COVERS_DIR, WEB_DIR, ensure_dirs
+from .config import COVERS_DIR, VERSION, WEB_DIR, ensure_dirs
 from .runtime import downloads, scheduler
 
 ensure_dirs()
@@ -25,7 +25,7 @@ async def lifespan(app: FastAPI):
         downloads.shutdown()
 
 
-app = FastAPI(title="黄果短剧采集器", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="黄果短剧采集器", version=VERSION, lifespan=lifespan)
 app.include_router(router)
 app.mount("/covers", StaticFiles(directory=str(COVERS_DIR)), name="covers")
 app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")

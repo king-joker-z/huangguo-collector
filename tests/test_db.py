@@ -3,6 +3,8 @@ import unittest
 from pathlib import Path
 
 from app.db import Database
+from app.downloader import DownloadManager
+from app.settings import Settings
 
 
 class DatabaseStatsTests(unittest.TestCase):
@@ -71,6 +73,44 @@ class DatabaseStatsTests(unittest.TestCase):
         self.assertEqual(stats["by_module"]["duanju"], 1)
         self.assertEqual(stats["episodes_done"], 1)
         self.assertEqual(stats["status"]["partial"], 1)
+
+    def test_retry_failed_and_clear(self):
+        card = {
+            "site_id": "10002",
+            "module": "duanju",
+            "title": "失败测试",
+            "url": "https://example/video/10002/",
+            "cover_url": "",
+            "score": 0,
+            "total_ep": 1,
+            "views": "",
+            "tags": [],
+            "badges": [],
+        }
+        drama_id, _, _ = self.db.upsert_card(card)
+        detail = {
+            "title": "失败测试",
+            "description": "x",
+            "cover_url": "",
+            "score": 0,
+            "total_ep": 1,
+            "tags": [],
+            "episodes": [{"ep": 1, "title": "第1集", "duration": 60}],
+        }
+        self.db.apply_detail("10002", detail)
+        task_id = self.db.upsert_task(drama_id, 1, "hevc")
+        self.db.update_task(task_id, state="failed", error="boom")
+        self.db.set_episode_state(drama_id, 1, "failed")
+
+        manager = DownloadManager(self.db, Settings(self.db), None)
+        result = manager.retry_failed()
+        self.assertEqual(result["queued"], 1)
+        self.assertEqual(manager.queue.qsize(), 1)
+        self.assertEqual(self.db.get_task(task_id)["state"], "queued")
+
+        self.db.update_task(task_id, state="failed", error="again")
+        self.db.clear_tasks(["failed"])
+        self.assertIsNone(self.db.get_task(task_id))
 
 
 if __name__ == "__main__":

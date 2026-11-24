@@ -676,6 +676,13 @@ class Database:
     def clear_finished_tasks(self) -> None:
         self.execute("DELETE FROM tasks WHERE state IN ('done','canceled')")
 
+    def clear_tasks(self, states: list[str]) -> None:
+        allowed = {"done", "canceled", "failed"}
+        states = [s for s in states if s in allowed]
+        if not states:
+            return
+        self.execute(f"DELETE FROM tasks WHERE state IN ({','.join('?' for _ in states)})", states)
+
     def reset_running_tasks(self) -> None:
         self.execute("UPDATE tasks SET state='queued' WHERE state='downloading'")
 

@@ -1,16 +1,17 @@
-﻿"""HTTP API。"""
+"""HTTP API。"""
 from __future__ import annotations
 
 import os
 import shutil
 import threading
+import time
 from pathlib import Path
 
 from fastapi import APIRouter, Body, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
 
 from . import nfo
-from .config import MODULES
+from .config import MODULES, SITE_BASE, VERSION
 from .db import now_str
 from .runtime import covers, db, downloads, hls, scan, scheduler, scraper, settings
 from .scheduler import format_datetime, next_run_at
@@ -103,8 +104,21 @@ def health():
         disk_free=free,
         download_root=str(settings.download_root),
         workers=downloads.worker_count,
-        version="1.4.2",
+        version=VERSION,
     )
+
+
+@router.get("/site-check")
+def site_check():
+    started = time.perf_counter()
+    try:
+        scraper.http.get_text(SITE_BASE + "/", timeout=15)
+    except ScrapeError as exc:
+        fail(f"站点连接失败: {exc}", 502)
+    except Exception as exc:
+        fail(f"站点连接失败: {exc}", 502)
+    latency = int((time.perf_counter() - started) * 1000)
+    return ok(latency_ms=latency, message=f"站点连接正常 · {latency}ms")
 
 
 @router.get("/stats")
@@ -525,10 +539,19 @@ def cancel_task(task_id: int):
     return ok(message="已请求取消")
 
 
+@router.post("/tasks/retry-failed")
+def retry_failed_tasks():
+    result = downloads.retry_failed()
+    return ok(**result, message=f"已重新入队 {result['queued']} 个失败任务")
+
+
 @router.post("/tasks/clear")
-def clear_tasks():
-    db.clear_finished_tasks()
-    return ok(message="已清除完成/取消的任务")
+def clear_tasks(payload: dict | None = Body(None)):
+    payload = payload or {}
+    states = payload.get("states") or ["done", "canceled"]
+    states = [str(s) for s in states]
+    db.clear_tasks(states)
+    return ok(message="已清理任务记录")
 
 
 @router.get("/history")

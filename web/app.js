@@ -1,4 +1,4 @@
-/* 黄果媒体库 · 前端（无构建依赖） */
+﻿/* 黄果媒体库 · 前端（无构建依赖） */
 (() => {
   'use strict';
 
@@ -56,6 +56,7 @@
     covers: { state: 'idle' },
     lastCoverState: 'idle',
     lastScanState: 'idle',
+    failureDismissed: false,
     quality: localStorage.getItem('hg_quality') || 'hevc',
   };
 
@@ -253,7 +254,7 @@
     if (state.health) {
       const ok = state.health.ffmpeg;
       $('#health-dot').style.background = ok ? 'var(--ok)' : 'var(--accent)';
-      $('#health-text').textContent = ok ? `v1.4.2 · ${state.health.workers || 0} 路下载` : 'ffmpeg 未就绪';
+      $('#health-text').textContent = ok ? `v1.4.3 · ${state.health.workers || 0} 路下载` : 'ffmpeg 未就绪';
     }
   }
 
@@ -336,6 +337,7 @@
       updateSidebarCounts();
       updateScanBanner(data.scan);
       updateCoverBanner(data.covers);
+      updateFailureBanner(data.summary);
       if (state.route.name === 'downloads') updateTaskRows(data.tasks || []);
     } catch (_) {}
   }
@@ -359,6 +361,15 @@
     const done = Number(covers.done) || 0;
     $('#cover-counter').textContent = total ? `${done} / ${total} 集` : '';
     $('#cover-fill').style.width = total ? `${Math.min(100, (done / total) * 100).toFixed(1)}%` : '3%';
+  }
+
+  function updateFailureBanner(summary) {
+    const banner = $('#failure-banner');
+    if (!banner) return;
+    const failed = Number(summary && summary.failed) || 0;
+    const hide = !failed || state.failureDismissed || state.route.name === 'downloads';
+    banner.classList.toggle('hidden', hide);
+    if (failed) $('#failure-count').textContent = failed;
   }
 
   function updateScanBanner(scan) {
@@ -425,10 +436,32 @@
 
   function renderLibraryView() {
     const view = $('#view');
-    view.innerHTML = `${toolbarHTML()}${activeFiltersHTML()}
-      ${state.items.length ? `<div class="grid ${state.selectMode ? 'selecting' : ''}">${state.items.map(cardHTML).join('')}</div>` : emptyHTML('媒体库还是空的', '点击右上角「开始采集」，先扫描模块页。', '开始采集', 'open-scan')}
+    const totalInLibrary = Number((state.stats || {}).total) || 0;
+    const empty = totalInLibrary > 0
+      ? emptyHTML('没有符合条件的剧集', '试试清空搜索或筛选条件。', '清除筛选', 'clear-all')
+      : onboardingHTML();
+    view.innerHTML = `${totalInLibrary > 0 ? toolbarHTML() + activeFiltersHTML() : ''}
+      ${state.items.length ? `<div class="grid ${state.selectMode ? 'selecting' : ''}">${state.items.map(cardHTML).join('')}</div>` : empty}
       ${state.items.length ? pagerHTML() : ''}`;
     syncSelectionDOM();
+  }
+
+  function onboardingHTML() {
+    return `<div class="onboarding">
+      <div class="onb-glyph">▦</div>
+      <h3>先把媒体库扫进来</h3>
+      <p>第一次使用按这三步走，后面基本不用管。</p>
+      <ol>
+        <li><b>扫描站点</b>：选择原创 / 短剧 / 漫剧，第一次建议全量。</li>
+        <li><b>设置下载目录</b>：填 NAS 路径，或点“浏览”选择文件夹。</li>
+        <li><b>订阅 + 定时</b>：定时扫库，发现新集自动下载。</li>
+      </ol>
+      <div class="onb-actions">
+        <button class="btn pri" data-action="open-scan">开始采集</button>
+        <a class="btn" href="#/settings">设置下载目录</a>
+        <a class="btn" href="#/schedules">创建定时任务</a>
+      </div>
+    </div>`;
   }
 
   function pageAllSelected() {
@@ -750,10 +783,19 @@
     const tasks = state.tasks;
     const active = tasks.filter((t) => t.state === 'downloading' || t.state === 'queued');
     const failed = tasks.filter((t) => t.state === 'failed');
-    const summary = state.activity.summary || {};
+    const summary = {
+      ...(state.activity.summary || {}),
+      downloading: tasks.filter((t) => t.state === 'downloading').length,
+      queued: tasks.filter((t) => t.state === 'queued').length,
+      done: tasks.filter((t) => t.state === 'done').length,
+      failed: failed.length,
+    };
     $('#view').innerHTML = `
       <div class="page-head"><h1>下载队列</h1><p>实时进度、失败重试与历史</p>
-        <div class="right"><button class="btn sm ghost" data-action="tasks-clear">清除已完成</button></div></div>
+        <div class="right">
+          ${failed.length ? '<button class="btn sm pri" data-action="retry-all-failed">重试全部失败</button><button class="btn sm ghost" data-action="clear-failed">清理失败</button>' : ''}
+          <button class="btn sm ghost" data-action="tasks-clear">清除已完成</button>
+        </div></div>
       <div class="summary-row">
         <span class="warn">下载中 <b>${summary.downloading || 0}</b></span>
         <span>排队 <b>${summary.queued || 0}</b></span>
@@ -768,7 +810,7 @@
 
   function sectionActive(active) {
     return `<div class="section-title">队列 <span class="count">${active.length} 个任务</span></div>
-      ${active.length ? `<div class="task-list">${active.map(taskRow).join('')}</div>` : '<div class="tag-empty">队列空闲 · 去媒体库选择剧集下载</div>'}`;
+      ${active.length ? `<div class="task-list">${active.map(taskRow).join('')}</div>` : '<div class="tag-empty">队列空闲 · <a href="#/library">去媒体库选择剧集下载</a></div>'}`;
   }
 
   function sectionFailed(failed) {
@@ -785,7 +827,7 @@
       <div class="task-icon">${failed ? '!' : '↓'}</div>
       <div class="task-main">
         <div class="task-title">${h(task.drama_title || '')} <span style="color:var(--dim)">· 第 ${task.ep} 集</span></div>
-        <div class="task-sub">${h(stateText)} · ${h(QUALITY_LABEL[task.quality] || task.quality || '')}</div>
+        <div class="task-sub ${failed ? 'task-error-link' : ''}" ${failed ? `data-action="task-error" data-id="${task.id}" title="${h(task.error || '')}"` : ''}>${h(stateText)} · ${h(QUALITY_LABEL[task.quality] || task.quality || '')}</div>
         <div class="task-bar ${progress >= 100 ? 'done' : ''}"><span style="width:${progress}%"></span></div>
       </div>
       <div class="task-state">${failed ? '—' : progress.toFixed(0) + '%'}</div>
@@ -1103,8 +1145,10 @@
               <div class="health-item"><span>下载线程</span><b>${health.workers || 0} 路</b></div>
               <div class="health-item"><span>磁盘剩余</span><b>${fmtBytes(health.disk_free || 0)}</b></div>
               <div class="health-item"><span>媒体库占用</span><b>${fmtBytes((state.stats && state.stats.storage_bytes) || 0)}</b></div>
-              <div class="health-item"><span>服务版本</span><b>${h(health.version || '1.4.2')}</b></div>
+              <div class="health-item"><span>服务版本</span><b>${h(health.version || '1.4.3')}</b></div>
             </div>
+            <button class="btn sm" data-action="site-check" style="margin-top:10px">测试站点连接</button>
+            <div class="hint" id="site-check-result"></div>
           </div>
           <div class="panel" style="margin-top:14px">
             <h2>媒体维护</h2>
@@ -1859,6 +1903,36 @@
         try { await api(`/tasks/${id}/cancel`, { method: 'POST' }); toast('已请求取消', 'ok'); refreshActivity(); }
         catch (err) { toast(err.message, 'err'); }
         break;
+      case 'retry-all-failed': {
+        try {
+          const res = await api('/tasks/retry-failed', { method: 'POST' });
+          toast(res.message || '已重新入队', 'ok');
+          await renderDownloadsView();
+        } catch (err) { toast(err.message, 'err'); }
+        break;
+      }
+      case 'clear-failed': {
+        if (!confirm('清理所有失败任务记录？分集状态会保留，可重新下载。')) break;
+        try {
+          await api('/tasks/clear', { method: 'POST', body: { states: ['failed'] } });
+          toast('已清理失败记录', 'ok');
+          await renderDownloadsView();
+        } catch (err) { toast(err.message, 'err'); }
+        break;
+      }
+      case 'task-error': {
+        const task = (state.tasks || []).find((t) => Number(t.id) === Number(el.dataset.id));
+        if (!task) break;
+        openModal(`
+          ${modalHead('下载失败')}
+          <div class="mbody">
+            <div class="task-error-title">${h(task.drama_title || '')} · 第 ${task.ep} 集</div>
+            <pre class="task-error-box">${h(task.error || '未知错误')}</pre>
+          </div>
+          <div class="mfoot"><button class="btn pri" data-close>关闭</button></div>
+        `);
+        break;
+      }
       case 'task-retry': {
         const dramaId = Number(el.dataset.drama);
         const ep = Number(el.dataset.ep);
@@ -1912,6 +1986,22 @@
       case 'browse-path':
         openFolderPicker();
         break;
+      case 'site-check': {
+        el.disabled = true;
+        const result = $('#site-check-result');
+        if (result) result.textContent = '正在连接站点…';
+        try {
+          const res = await api('/site-check');
+          if (result) result.textContent = res.message || `站点连接正常 · ${res.latency_ms}ms`;
+          toast(res.message || '站点连接正常', 'ok');
+        } catch (err) {
+          if (result) result.textContent = err.message;
+          toast(err.message, 'err');
+        } finally {
+          el.disabled = false;
+        }
+        break;
+      }
       default: break;
     }
   }
@@ -1983,6 +2073,10 @@
     state.q = '';
     $('#search-wrap').classList.remove('has');
     applyFilters();
+  });
+  $('#failure-close').addEventListener('click', () => {
+    state.failureDismissed = true;
+    $('#failure-banner').classList.add('hidden');
   });
   $('#tag-search').addEventListener('input', (event) => {
     state.tagSearch = event.target.value;
@@ -2068,6 +2162,7 @@
 
   boot();
 })();
+
 
 
 
