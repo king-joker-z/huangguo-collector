@@ -50,6 +50,7 @@
     health: {},
     settings: {},
     detail: null,
+    detailActiveCount: 0,
     epSelected: new Set(),
     tasks: [],
     history: [],
@@ -256,7 +257,7 @@
     if (state.health) {
       const ok = state.health.ffmpeg;
       $('#health-dot').style.background = ok ? 'var(--ok)' : 'var(--accent)';
-      $('#health-text').textContent = ok ? `v1.6.0 · ${state.health.workers || 0} 路下载` : 'ffmpeg 未就绪';
+      $('#health-text').textContent = ok ? `v1.6.1 · ${state.health.workers || 0} 路下载` : 'ffmpeg 未就绪';
     }
   }
 
@@ -349,6 +350,14 @@
       updateCoverBanner(data.covers);
       updateFailureBanner(data.summary);
       if (state.route.name === 'downloads') updateTaskRows(data.tasks || []);
+      if (state.route.name === 'drama' && state.detail) {
+        const activeForDetail = (data.tasks || []).filter((t) => Number(t.drama_id) === Number(state.detail.id));
+        activeForDetail.forEach((task) => updateEpisodeTile(task.ep, task.state));
+        if (state.detailActiveCount > 0 && activeForDetail.length === 0) {
+          loadDetail(state.detail.id);
+        }
+        state.detailActiveCount = activeForDetail.length;
+      }
     } catch (_) {}
   }
 
@@ -629,6 +638,7 @@
   async function loadDetail(id) {
     const token = ++renderToken;
     state.detail = null;
+    state.detailActiveCount = 0;
     state.epSelected = new Set();
     $('#view').innerHTML = '<div class="skeleton" style="height:340px;border-radius:14px"></div>';
     try {
@@ -652,6 +662,9 @@
     const siteTags = d.tags_site || [];
     const year = d.year || (d.premiered ? String(d.premiered).slice(0, 4) : '');
     const episodes = d.episodes || [];
+    const queuedCount = episodes.filter((e) => e.state === 'queued').length;
+    const downloadingCount = episodes.filter((e) => e.state === 'downloading').length;
+    const failedCount = episodes.filter((e) => e.state === 'failed').length;
     const doneBytes = episodes.filter((e) => e.state === 'done').reduce((sum, e) => sum + (Number(e.file_size) || 0), 0);
     const progressPct = pct(done, total);
     const estimate = d.estimate || {};
@@ -737,7 +750,7 @@
 
       <div class="ep-panel">
         <div class="ep-head">
-          <h2>分集 <small>${episodes.length} 集 · 已下载 ${done} 集</small></h2>
+          <h2>分集 <small>${episodes.length} 集 · 已下载 ${done} 集 · 待下载 ${missing} 集${queuedCount ? ` · 排队 ${queuedCount}` : ''}${downloadingCount ? ` · 下载中 ${downloadingCount}` : ''}${failedCount ? ` · 失败 ${failedCount}` : ''}</small></h2>
           <div class="spacer"></div>
           <div class="ep-actions">
             <select class="select" id="detail-quality">
@@ -761,13 +774,24 @@
     updateEpSelection();
   }
 
+  function updateEpisodeTile(number, taskState) {
+    const el = $(`.ep[data-ep="${Number(number)}"]`);
+    if (!el) return;
+    el.classList.remove('done', 'downloading', 'queued', 'failed');
+    const mapped = taskState === 'downloading' ? 'downloading' : 'queued';
+    el.classList.add(mapped);
+    const small = el.querySelector('small');
+    if (small) small.textContent = taskState === 'downloading' ? '下载中' : '排队中';
+  }
+
   function epHTML(ep) {
     const selected = state.epSelected.has(ep.ep);
-    const stateClass = ep.state === 'done' ? 'done' : ep.state === 'downloading' ? 'downloading' : ep.state === 'failed' ? 'failed' : '';
+    const stateClass = ep.state === 'done' ? 'done' : ep.state === 'downloading' ? 'downloading' : ep.state === 'queued' ? 'queued' : ep.state === 'failed' ? 'failed' : '';
+    const stateText = ep.state === 'done' ? '已下载' : ep.state === 'downloading' ? '下载中' : ep.state === 'queued' ? '排队中' : ep.state === 'failed' ? '失败' : (ep.duration ? fmtDuration(ep.duration) : '待下载');
     return `<div class="ep ${stateClass} ${selected ? 'selected' : ''}" data-ep="${ep.ep}" title="${h(ep.synopsis || ep.title || '')}">
       ${ep.thumb ? `<img src="${h(ep.thumb)}" alt="" loading="lazy" onerror="this.style.display='none'">` : ''}
       <b>${String(ep.ep).padStart(2, '0')}</b>
-      <small>${ep.state === 'done' ? '已下载' : ep.state === 'failed' ? '失败' : (ep.duration ? fmtDuration(ep.duration) : '待下载')}</small>
+      <small>${stateText}</small>
       <span class="ep-dot"></span>
     </div>`;
   }
@@ -1201,7 +1225,7 @@
               <div class="health-item"><span>下载线程</span><b>${health.workers || 0} 路</b></div>
               <div class="health-item"><span>磁盘剩余</span><b>${fmtBytes(health.disk_free || 0)}</b></div>
               <div class="health-item"><span>媒体库占用</span><b>${fmtBytes((state.stats && state.stats.storage_bytes) || 0)}</b></div>
-              <div class="health-item"><span>服务版本</span><b>${h(health.version || '1.6.0')}</b></div>
+              <div class="health-item"><span>服务版本</span><b>${h(health.version || '1.6.1')}</b></div>
             </div>
             <div style="display:flex;gap:6px;margin-top:10px">
               <button class="btn sm" data-action="site-check" data-source="huangguo">测试黄果</button>
@@ -2262,6 +2286,7 @@
 
   boot();
 })();
+
 
 
 

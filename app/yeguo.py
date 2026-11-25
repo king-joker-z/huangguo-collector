@@ -220,11 +220,12 @@ class YeguoScraper(Scraper):
         return self.parse_listing(html, module, tab)
 
     # ----------------------------------------------------------------- play
-    def _play(self, site_id: str) -> dict:
+    def _play(self, site_id: str, episode_sort: int = 0) -> dict:
         raw = self.raw_id(site_id)
+        cache_key = f"{raw}:{int(episode_sort or 0)}"
         now = time.time()
         with self._play_lock:
-            cached = self._play_cache.get(raw)
+            cached = self._play_cache.get(cache_key)
             if cached and cached[0] > now:
                 return cached[1]
         oid = secrets.token_hex(16)
@@ -241,6 +242,8 @@ class YeguoScraper(Scraper):
             "video_id": raw,
             "episode_id": "0",
         }
+        if int(episode_sort or 0) > 1:
+            form["episode_sort"] = str(int(episode_sort))
         try:
             response = self.http.request("POST", PLAY_URL, data=form, timeout=30)
             body = response.json()
@@ -255,7 +258,7 @@ class YeguoScraper(Scraper):
             if len(self._play_cache) >= 256:
                 oldest = min(self._play_cache, key=lambda k: self._play_cache[k][0])
                 self._play_cache.pop(oldest, None)
-            self._play_cache[raw] = (now + 300, payload)
+            self._play_cache[cache_key] = (now + 300, payload)
         return payload
 
     def fetch_detail(self, site_id: str) -> dict:
@@ -335,7 +338,7 @@ class YeguoScraper(Scraper):
 
     def get_playback(self, site_id: str, ep: int) -> dict:
         raw = self.raw_id(site_id)
-        data = (self._play(raw).get("data") or {})
+        data = (self._play(raw, 0).get("data") or {})
         current = None
         for item in data.get("episodeAll") or []:
             if item.get("is_adv"):
@@ -348,6 +351,15 @@ class YeguoScraper(Scraper):
                 current = item
                 break
         url = (current or {}).get("video_url") or (data.get("video_url") if int(ep) <= 1 else "")
+        # episodeAll 可能只返回分页的一段；按 episode_sort 单独取当前集。
+        if not url and int(ep) > 1:
+            try:
+                specific = (self._play(raw, int(ep)).get("data") or {})
+                current = specific
+                url = specific.get("video_url") or ""
+                data = specific
+            except ScrapeError:
+                pass
         if not url:
             raise ScrapeError(f"野果第 {ep} 集没有播放地址")
         h265 = (current or {}).get("video_url_h265") or data.get("video_url_h265") or ""

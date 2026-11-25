@@ -223,8 +223,12 @@ class DownloadManager:
                 return
             # HEVC 原画在部分 ffmpeg/容器环境可能不兼容；第二次起自动回退 H264。
             attempt_quality = "h264" if quality == "hevc" and attempt >= 2 else quality
+            include_audio = attempt < 3
             try:
-                self._download_once(task_id, dict(drama), dict(episode), attempt_quality)
+                self._download_once(
+                    task_id, dict(drama), dict(episode), attempt_quality,
+                    include_audio=include_audio,
+                )
                 return
             except CanceledError:
                 self._finish_canceled(task_id, drama, episode)
@@ -232,6 +236,8 @@ class DownloadManager:
             except Exception as exc:
                 last_error = str(exc)
                 note = "（已回退 H264）" if attempt_quality != quality else ""
+                if not include_audio:
+                    note += "（无音轨兜底）"
                 self.db.update_task(task_id, error=f"第{attempt}次失败{note}: {last_error}")
                 self.db.set_episode_state(int(drama["id"]), int(episode["ep"]), "queued")
                 if attempt < 3:
@@ -271,7 +277,8 @@ class DownloadManager:
         self._cleanup_tmp(drama, episode)
 
     # ------------------------------------------------------------------ one file
-    def _download_once(self, task_id: int, drama: dict, episode: dict, quality: str) -> None:
+    def _download_once(self, task_id: int, drama: dict, episode: dict, quality: str,
+                       include_audio: bool = True) -> None:
         source = str(drama.get("source") or "huangguo")
         scraper = self.scrapers.get(source) or self.scraper
         if scraper is None:
@@ -308,19 +315,28 @@ class DownloadManager:
             "-rw_timeout", "120000000",
             "-i", url,
             "-map", "0:v:0",
-            "-map", "0:a:0?",
         ]
+        if include_audio:
+            cmd += ["-map", "0:a:0?"]
         if quality == "720p":
             cmd += [
                 "-vf", "scale=-2:720",
                 "-c:v", "libx264",
                 "-preset", "veryfast",
                 "-crf", "23",
-                "-c:a", "aac",
-                "-b:a", "128k",
             ]
+            if include_audio:
+                cmd += ["-c:a", "aac", "-b:a", "128k"]
+            else:
+                cmd += ["-an"]
         else:
-            cmd += ["-c", "copy"]
+            # 视频原样复制；音频统一转 AAC，避开 ADTS/AAC 头不兼容导致
+            # aac_adtstoasc 在 MP4 封装时报 Invalid data。
+            cmd += ["-c:v", "copy"]
+            if include_audio:
+                cmd += ["-c:a", "aac", "-b:a", "128k"]
+            else:
+                cmd += ["-an"]
             if use_hevc:
                 cmd += ["-tag:v", "hvc1"]
         cmd += ["-movflags", "+faststart", "-max_muxing_queue_size", "2048", "-f", "mp4", str(tmp)]

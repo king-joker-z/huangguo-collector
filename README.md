@@ -32,6 +32,15 @@
 
 > 仅用于个人媒体库整理。内容为成人向 AI 短剧（18+），请遵守站点条款与当地法律法规，不要公开传播。
 
+## 1.6.1 下载修复
+
+- 原画下载改为「视频复制 + 音频转 AAC」，避开 `aac_adtstoasc / Error applying bitstream filters` 这类音轨不兼容报错。
+- 第 3 次重试自动降级为无音轨视频，至少保证画面落盘。
+- 野果 `episodeAll` 只返回当前分页时，播放接口会带 `episode_sort` 单独取第 N 集，修复「第 28 集没有播放地址」。
+- 分集状态明确区分「排队中 / 下载中 / 待下载 / 已下载 / 失败」。
+- 详情页分集标题显示：待下载、排队、下载中、失败数量；下载开始/完成会自动刷新状态。
+- 新增 19 个单测。
+
 ## 1.6.0 标签排除与队列暂停
 
 - 标签管理页新增「排除标签」：题材标签、自建标签都可排除/恢复。
@@ -336,12 +345,12 @@ huangguo-collector/
 
 镜像已发布到 Docker Hub（`linux/amd64`，适配 Z4 Pro）：
 
-- **镜像**：`jokermelove/huangguo-collector:1.6.0`（另有 `latest`）
+- **镜像**：`jokermelove/huangguo-collector:1.6.1`（另有 `latest`）
 - **GitHub**：<https://github.com/king-joker-z/huangguo-collector>
 - **Actions**：推送到 `main` 自动构建并推送 Docker Hub，也可在 Actions 页手动 `Run workflow`
 
 ```sh
-docker pull jokermelove/huangguo-collector:1.6.0
+docker pull jokermelove/huangguo-collector:1.6.1
 ```
 
 ### 方式 A：极空间直接拉取镜像（推荐）
@@ -367,7 +376,7 @@ docker compose -f docker-compose.zspace.yml up -d
 本机有 Docker 时：
 
 ```sh
-docker build --platform linux/amd64 -t jokermelove/huangguo-collector:1.6.0 .
+docker build --platform linux/amd64 -t jokermelove/huangguo-collector:1.6.1 .
 # 或
 docker compose up -d --build
 ```
@@ -413,6 +422,7 @@ docker exec huangguo-collector df -h /data /downloads
 ## 13. 免责声明
 
 本项目只做本地采集与媒体库整理，不托管、不分发任何内容。请自行确认内容合法性、年龄限制与站点服务条款；因使用产生的任何后果由使用者承担。
+
 
 
 

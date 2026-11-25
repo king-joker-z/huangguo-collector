@@ -566,6 +566,8 @@ body.modal-open { overflow: hidden; }
 .ep.done .ep-dot { background: var(--ok); box-shadow: 0 0 6px rgba(61, 220, 151, .7); }
 .ep.downloading { border-color: rgba(255, 180, 84, .4); background: rgba(255, 180, 84, .06); }
 .ep.downloading .ep-dot { background: var(--warn); }
+.ep.queued { border-color: rgba(91, 157, 255, .3); background: rgba(91, 157, 255, .06); }
+.ep.queued .ep-dot { background: var(--blue); }
 .ep.failed { border-color: rgba(255, 92, 122, .4); }
 .ep.failed .ep-dot { background: var(--accent); }
 .ep.selected { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); background: rgba(255, 92, 122, .1); }
