@@ -1,4 +1,4 @@
-﻿/* 黄果媒体库 · 前端（无构建依赖） */
+/* 黄果媒体库 · 前端（无构建依赖） */
 (() => {
   'use strict';
 
@@ -257,7 +257,7 @@
     if (state.health) {
       const ok = state.health.ffmpeg;
       $('#health-dot').style.background = ok ? 'var(--ok)' : 'var(--accent)';
-      $('#health-text').textContent = ok ? `v1.6.1 · ${state.health.workers || 0} 路下载` : 'ffmpeg 未就绪';
+      $('#health-text').textContent = ok ? `v1.7.0 · ${state.health.workers || 0} 路下载` : 'ffmpeg 未就绪';
     }
   }
 
@@ -602,13 +602,19 @@
       bar.innerHTML = '';
       return;
     }
+    const selectedItems = (state.items || []).filter((item) => state.selected.has(item.id));
+    const allSubscribed = selectedItems.length > 0 && selectedItems.every((item) => item.subscribed);
+    const allFavorite = selectedItems.length > 0 && selectedItems.every((item) => item.favorite);
+    const hasUpdates = selectedItems.some((item) => item.has_update);
     bar.innerHTML = `<span class="n">已选 <b>${state.selected.size}</b> 项</span><span class="divider"></span>
       <button class="btn sm pri" data-action="batch-download">下载整部</button>
       <button class="btn sm" data-action="batch-download-new">只下更新</button>
+      <button class="btn sm ${allSubscribed ? 'sub-on' : ''}" data-action="batch-subscribe" data-mode="${allSubscribed ? 'unsubscribe' : 'subscribe'}">${allSubscribed ? '取消订阅' : '批量订阅'}</button>
       <button class="btn sm" data-action="batch-tag">加标签</button>
       <button class="btn sm" data-action="batch-scan">同步详情</button>
       <button class="btn sm" data-action="batch-covers">补集封面</button>
-      <button class="btn sm" data-action="batch-fav">收藏</button>
+      <button class="btn sm" data-action="batch-fav" data-value="${allFavorite ? 0 : 1}">${allFavorite ? '取消收藏' : '收藏'}</button>
+      ${hasUpdates ? '<button class="btn sm ghost" data-action="batch-clear-update">忽略更新</button>' : ''}
       <button class="btn sm ghost" data-action="batch-clear">取消选择</button>`;
     bar.classList.add('show');
   }
@@ -1225,7 +1231,7 @@
               <div class="health-item"><span>下载线程</span><b>${health.workers || 0} 路</b></div>
               <div class="health-item"><span>磁盘剩余</span><b>${fmtBytes(health.disk_free || 0)}</b></div>
               <div class="health-item"><span>媒体库占用</span><b>${fmtBytes((state.stats && state.stats.storage_bytes) || 0)}</b></div>
-              <div class="health-item"><span>服务版本</span><b>${h(health.version || '1.6.1')}</b></div>
+              <div class="health-item"><span>服务版本</span><b>${h(health.version || '1.7.0')}</b></div>
             </div>
             <div style="display:flex;gap:6px;margin-top:10px">
               <button class="btn sm" data-action="site-check" data-source="huangguo">测试黄果</button>
@@ -1479,6 +1485,66 @@
         navigate('/library');
       } else {
         applyFilters();
+      }
+    });
+  }
+
+  async function openBatchSubscribeDialog(ids, mode = 'subscribe') {
+    ids = ids.map(Number).filter(Boolean);
+    if (!ids.length) return;
+    if (mode === 'unsubscribe') {
+      if (!confirm(`取消这 ${ids.length} 部剧的订阅？已下载文件不会删除。`)) return;
+      try {
+        const res = await api('/dramas/batch', { method: 'POST', body: { ids, action: 'unsubscribe' } });
+        toast(res.message || '已取消订阅', 'ok');
+        state.selected.clear();
+        await loadStats();
+        render();
+      } catch (err) { toast(err.message, 'err'); }
+      return;
+    }
+    const modal = openModal(`
+      ${modalHead(`批量订阅 ${ids.length} 部剧`)}
+      <div class="mbody">
+        <div class="field"><label>订阅画质</label>
+          <div class="quality-list">
+            ${['hevc', 'h264', '720p'].map((key) => `<label class="quality-opt">
+              <input type="radio" name="sub-quality" value="${key}" ${state.quality === key ? 'checked' : ''}>
+              <span class="q">${QUALITY_LABEL[key]}</span>
+            </label>`).join('')}
+          </div>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:7px">
+          <label class="checkbox-line"><input type="checkbox" id="sub-auto" checked> 扫库发现新集时自动下载</label>
+          <label class="checkbox-line"><input type="checkbox" id="sub-now"> 订阅后立即补下已有分集（会同步详情并加入下载队列）</label>
+        </div>
+        <div class="scan-note" style="margin-top:12px">只影响新订阅；之前已订阅的剧会更新为本次画质/自动下载设置。</div>
+      </div>
+      <div class="mfoot"><button class="btn ghost" data-close>取消</button><button class="btn pri" id="sub-confirm">确认订阅</button></div>
+    `, { wide: true });
+    modal.q('#sub-confirm').addEventListener('click', async () => {
+      const quality = modal.q('input[name="sub-quality"]:checked').value;
+      state.quality = quality;
+      localStorage.setItem('hg_quality', quality);
+      modal.q('#sub-confirm').disabled = true;
+      try {
+        const res = await api('/dramas/batch', {
+          method: 'POST',
+          body: {
+            ids, action: 'subscribe', quality,
+            auto_download: modal.q('#sub-auto').checked,
+            download_now: modal.q('#sub-now').checked,
+          },
+        });
+        modal.close();
+        toast(res.message || '已订阅', 'ok');
+        state.selected.clear();
+        await loadStats();
+        refreshActivity();
+        render();
+      } catch (err) {
+        modal.q('#sub-confirm').disabled = false;
+        toast(err.message, 'err');
       }
     });
   }
@@ -1807,6 +1873,7 @@
       case 'quick-download': openDownloadDialog([id], el.dataset.scope || 'all'); break;
       case 'batch-download': openDownloadDialog([...state.selected], 'all'); break;
       case 'batch-download-new': openDownloadDialog([...state.selected], 'new'); break;
+      case 'batch-subscribe': openBatchSubscribeDialog([...state.selected], el.dataset.mode || 'subscribe'); break;
       case 'batch-tag': openTagDialog([...state.selected]); break;
       case 'batch-scan': {
         const res = await api('/dramas/batch', { method: 'POST', body: { ids: [...state.selected], action: 'scan' } }).catch((err) => ({ message: err.message }));
@@ -1814,8 +1881,21 @@
         break;
       }
       case 'batch-fav': {
-        const res = await api('/dramas/batch', { method: 'POST', body: { ids: [...state.selected], action: 'favorite', value: 1 } }).catch((err) => ({ message: err.message }));
-        toast(res.message || '已收藏', 'ok');
+        const value = Number(el.dataset.value ?? 1);
+        const res = await api('/dramas/batch', { method: 'POST', body: { ids: [...state.selected], action: 'favorite', value } }).catch((err) => ({ message: err.message }));
+        toast(res.message || (value ? '已收藏' : '已取消收藏'), 'ok');
+        await loadStats();
+        render();
+        break;
+      }
+      case 'batch-clear-update': {
+        try {
+          const res = await api('/dramas/batch', { method: 'POST', body: { ids: [...state.selected], action: 'clear_update' } });
+          toast(res.message || '已忽略更新', 'ok');
+          state.selected.clear();
+          await loadStats();
+          render();
+        } catch (err) { toast(err.message, 'err'); }
         break;
       }
       case 'batch-clear':
@@ -2286,6 +2366,7 @@
 
   boot();
 })();
+
 
 
 

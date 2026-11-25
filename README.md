@@ -1,9 +1,10 @@
-# 黄果采集器 · Huangguo Collector
+﻿# 黄果采集器 · Huangguo Collector
 
 面向 `huangguoai.com`（黄果短剧）和 `yeguodj.com`（野果短剧）的本地采集 + 媒体库管理工具。黄果按原创 / 短剧 / 漫剧三个模块采集，野果按探索分类全量采集；两站同名剧自动保留集数更多的版本。提供：
 
 - 直观的 Web 媒体库（深色界面，卡片式浏览、搜索、筛选、分页）
 - 一键下载整部剧 / 只下载新增分集 / 分批下载
+- 批量订阅 / 取消订阅，批量忽略更新、补封面、同步详情、收藏
 - 后台下载队列（进度、速度、大小、取消、失败重试）
 - 自动生成 Emby / Jellyfin / Kodi 电视剧刮削结构（NFO + 海报 + fanart）
 - 自动打「已下载」标签 + 自定义标签管理
@@ -32,6 +33,17 @@
 
 > 仅用于个人媒体库整理。内容为成人向 AI 短剧（18+），请遵守站点条款与当地法律法规，不要公开传播。
 
+## 1.7.0 批量订阅
+
+- 媒体库批量条新增「批量订阅」：选多部剧后一次订阅。
+- 已全选的剧都订阅时，按钮自动变为「取消订阅」。
+- 订阅弹窗可设画质（HEVC/H264/720P）、是否自动下载新集、是否订阅后立即补下已有分集。
+- 批量「忽略更新」：一次清掉多部剧的更新标记。
+- 批量收藏改为切换：已全收藏时显示「取消收藏」。
+- 修复批量「同步详情」只调用黄果 scraper 的问题，野果也可批量同步。
+- 移动端批量条支持横向滚动，不再挤出屏幕。
+- 19 个单测全部通过。
+
 ## 1.6.1 下载修复
 
 - 原画下载改为「视频复制 + 音频转 AAC」，避开 `aac_adtstoasc / Error applying bitstream filters` 这类音轨不兼容报错。
@@ -39,7 +51,7 @@
 - 野果 `episodeAll` 只返回当前分页时，播放接口会带 `episode_sort` 单独取第 N 集，修复「第 28 集没有播放地址」。
 - 分集状态明确区分「排队中 / 下载中 / 待下载 / 已下载 / 失败」。
 - 详情页分集标题显示：待下载、排队、下载中、失败数量；下载开始/完成会自动刷新状态。
-- 新增 19 个单测。
+- 19 个单测全部通过。
 
 ## 1.6.0 标签排除与队列暂停
 
@@ -296,7 +308,7 @@ huangguo-collector/
 | GET | `/api/dramas` | 分页/搜索/筛选/排序；支持 `source`、`include_duplicates` |
 | GET | `/api/dramas/{id}` | 详情 + 分集 + 标签 + 空间估算；重复条目返回 `duplicate_preferred` |
 | POST | `/api/dramas/{id}/download` | `{scope: all/new/eps, eps, quality}` |
-| POST | `/api/dramas/batch` | 批量下载/同步/打标签/收藏 |
+| POST | `/api/dramas/batch` | 批量下载/订阅/取消订阅/同步/打标签/收藏/忽略更新 |
 | GET | `/api/updates` | 有更新的剧 |
 | GET | `/api/subscriptions` | 订阅列表 + 更新/自动下载统计 |
 | POST | `/api/dramas/{id}/subscribe` | `{enabled, quality, auto_download, download_now}` |
@@ -345,12 +357,12 @@ huangguo-collector/
 
 镜像已发布到 Docker Hub（`linux/amd64`，适配 Z4 Pro）：
 
-- **镜像**：`jokermelove/huangguo-collector:1.6.1`（另有 `latest`）
+- **镜像**：`jokermelove/huangguo-collector:1.7.0`（另有 `latest`）
 - **GitHub**：<https://github.com/king-joker-z/huangguo-collector>
 - **Actions**：推送到 `main` 自动构建并推送 Docker Hub，也可在 Actions 页手动 `Run workflow`
 
 ```sh
-docker pull jokermelove/huangguo-collector:1.6.1
+docker pull jokermelove/huangguo-collector:1.7.0
 ```
 
 ### 方式 A：极空间直接拉取镜像（推荐）
@@ -376,7 +388,7 @@ docker compose -f docker-compose.zspace.yml up -d
 本机有 Docker 时：
 
 ```sh
-docker build --platform linux/amd64 -t jokermelove/huangguo-collector:1.6.1 .
+docker build --platform linux/amd64 -t jokermelove/huangguo-collector:1.7.0 .
 # 或
 docker compose up -d --build
 ```
@@ -422,6 +434,8 @@ docker exec huangguo-collector df -h /data /downloads
 ## 13. 免责声明
 
 本项目只做本地采集与媒体库整理，不托管、不分发任何内容。请自行确认内容合法性、年龄限制与站点服务条款；因使用产生的任何后果由使用者承担。
+
+
 
 
 

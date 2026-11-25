@@ -308,15 +308,54 @@ def batch(payload: dict = Body(...)):
                     row = db.get_drama(drama_id)
                     if not row:
                         continue
-                    detail = scraper.fetch_detail(str(row["site_id"]))
+                    source = str(row["source"] or "huangguo")
+                    site_scraper = scrapers.get(source) or scraper
+                    detail = site_scraper.fetch_detail(str(row["site_id"]))
                     db.apply_detail(str(row["site_id"]), detail)
                     if not row["cover_path"]:
-                        scraper.save_cover(str(row["site_id"]), detail.get("cover_url") or "")
+                        site_scraper.save_cover(str(row["site_id"]), detail.get("cover_url") or "")
+                    scan.auto_download(drama_id)
                 except Exception:
                     continue
 
         threading.Thread(target=worker, name="batch-scan", daemon=True).start()
         return ok(message=f"已开始同步 {len(ids)} 部剧集")
+
+    if action in ("subscribe", "unsubscribe"):
+        if quality not in ("hevc", "h264", "720p"):
+            quality = "hevc"
+        auto = bool(payload.get("auto_download", True))
+        download_now = bool(payload.get("download_now"))
+        changed = skipped = queued = failed = 0
+        for drama_id in ids:
+            row = db.get_drama(drama_id)
+            if not row or int(row["is_duplicate"] or 0) or db.is_tag_excluded(drama_id):
+                skipped += 1
+                continue
+            if action == "unsubscribe":
+                if db.get_subscription(drama_id):
+                    db.delete_subscription(drama_id)
+                    changed += 1
+                else:
+                    skipped += 1
+                continue
+            db.set_subscription(drama_id, True, quality, auto)
+            changed += 1
+            if download_now:
+                try:
+                    _ensure_episodes(drama_id)
+                    result = downloads.enqueue_new(drama_id, quality)
+                    queued += int(result.get("queued") or 0)
+                except Exception:
+                    failed += 1
+        if action == "unsubscribe":
+            return ok(changed=changed, skipped=skipped,
+                      message=f"已取消 {changed} 部订阅，跳过 {skipped} 部")
+        return ok(
+            changed=changed, skipped=skipped, queued=queued, failed=failed,
+            quality=quality, auto_download=auto,
+            message=f"已订阅 {changed} 部，跳过 {skipped} 部" + (f"，入队 {queued} 集" if queued else ""),
+        )
 
     if action == "tag":
         add = [str(t) for t in payload.get("add", [])]
