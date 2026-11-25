@@ -124,6 +124,53 @@ class DatabaseStatsTests(unittest.TestCase):
         self.assertEqual(yeguo["is_duplicate"], 1)
         self.assertEqual(yeguo["duplicate_of"], huangguo_id)
 
+    def test_excluded_site_and_custom_tags(self):
+        card = {
+            "site_id": "10020",
+            "module": "duanju",
+            "title": "标签测试",
+            "url": "https://example/video/10020/",
+            "cover_url": "",
+            "score": 0,
+            "total_ep": 1,
+            "views": "",
+            "tags": ["乱伦", "都市"],
+            "badges": [],
+        }
+        drama_id, _, _ = self.db.upsert_card(card)
+        detail = {
+            "title": "标签测试",
+            "description": "x",
+            "cover_url": "",
+            "score": 0,
+            "total_ep": 1,
+            "tags": ["乱伦", "都市"],
+            "episodes": [{"ep": 1, "title": "第1集", "duration": 60}],
+        }
+        self.db.apply_detail("10020", detail)
+        self.assertEqual(self.db.list_dramas()["total"], 1)
+        self.db.add_excluded_tag("乱伦")
+        self.assertTrue(self.db.is_tag_excluded(drama_id))
+        self.assertEqual(self.db.list_dramas()["total"], 0)
+        self.assertEqual(self.db.stats(ttl=0)["total"], 0)
+        self.db.remove_excluded_tag("乱伦")
+        self.assertEqual(self.db.list_dramas()["total"], 1)
+
+        tag_id = self.db.ensure_tag("自建屏蔽", "#ff0000", "custom")
+        self.db.add_tag_to_drama(drama_id, tag_id)
+        self.db.add_excluded_tag("自建屏蔽")
+        self.assertEqual(self.db.list_dramas()["total"], 0)
+        self.db.remove_excluded_tag("自建屏蔽")
+        self.assertEqual(self.db.list_dramas()["total"], 1)
+
+    def test_pause_resume(self):
+        manager = DownloadManager(self.db, Settings(self.db), None)
+        self.assertFalse(manager.is_paused)
+        manager.pause()
+        self.assertTrue(manager.is_paused)
+        manager.resume()
+        self.assertFalse(manager.is_paused)
+
     def test_retry_failed_and_clear(self):
         card = {
             "site_id": "10002",

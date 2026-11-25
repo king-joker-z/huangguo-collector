@@ -40,6 +40,7 @@ class DownloadManager:
         self.procs: dict[int, subprocess.Popen] = {}
         self.canceled: set[int] = set()
         self.stop_event = threading.Event()
+        self.paused = threading.Event()
         self.workers: list[threading.Thread] = []
         self.ffmpeg = shutil.which("ffmpeg") or "ffmpeg"
 
@@ -72,6 +73,16 @@ class DownloadManager:
                 proc.kill()
             except Exception:
                 pass
+
+    def pause(self) -> None:
+        self.paused.set()
+
+    def resume(self) -> None:
+        self.paused.clear()
+
+    @property
+    def is_paused(self) -> bool:
+        return self.paused.is_set()
 
     @property
     def worker_count(self) -> int:
@@ -168,12 +179,19 @@ class DownloadManager:
     # --------------------------------------------------------------------- worker
     def _worker_loop(self) -> None:
         while not self.stop_event.is_set():
+            if self.paused.is_set():
+                self.stop_event.wait(0.5)
+                continue
             try:
                 task_id = self.queue.get(timeout=1.0)
             except queue.Empty:
                 continue
             if self.stop_event.is_set():
                 break
+            if self.paused.is_set():
+                self.queue.put(task_id)
+                self.queue.task_done()
+                continue
             try:
                 self._process(task_id)
             except Exception:
@@ -455,6 +473,7 @@ class DownloadManager:
             "queued": int(row["queued"] or 0) if row else 0,
             "done": int(row["done"] or 0) if row else 0,
             "failed": int(row["failed"] or 0) if row else 0,
+            "paused": self.paused.is_set(),
             "workers": self.worker_count,
             "ffmpeg": self.ffmpeg,
         }

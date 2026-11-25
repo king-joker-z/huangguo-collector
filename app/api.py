@@ -424,7 +424,7 @@ def subscriptions_auto(payload: dict = Body(...)):
 # ----------------------------------------------------------------------- tags
 @router.get("/tags")
 def tags():
-    return ok(tags=db.list_tags())
+    return ok(tags=db.list_tags(), excluded=db.list_excluded_tags())
 
 
 @router.post("/tags")
@@ -441,6 +441,29 @@ def create_tag(payload: dict = Body(...)):
 def delete_tag(tag_id: int):
     db.delete_tag(tag_id)
     return ok(tags=db.list_tags())
+
+
+@router.get("/excluded-tags")
+def excluded_tags():
+    return ok(excluded=db.list_excluded_tags())
+
+
+@router.post("/excluded-tags")
+def add_excluded_tag(payload: dict = Body(...)):
+    name = str(payload.get("name") or "").strip()
+    if not name:
+        fail("标签名不能为空")
+    try:
+        db.add_excluded_tag(name)
+    except ValueError as exc:
+        fail(str(exc))
+    return ok(excluded=db.list_excluded_tags(), message=f"已排除标签「{name}」")
+
+
+@router.delete("/excluded-tags")
+def remove_excluded_tag(name: str = Query(...)):
+    db.remove_excluded_tag(name)
+    return ok(excluded=db.list_excluded_tags(), message=f"已恢复标签「{name}」")
 
 
 # ------------------------------------------------------------------- settings
@@ -548,6 +571,18 @@ def cancel_task(task_id: int):
     if not downloads.cancel(task_id):
         fail("任务无法取消")
     return ok(message="已请求取消")
+
+
+@router.post("/downloads/pause")
+def pause_downloads():
+    downloads.pause()
+    return ok(paused=True, message="下载队列已暂停，当前正在下载的分集会继续完成")
+
+
+@router.post("/downloads/resume")
+def resume_downloads():
+    downloads.resume()
+    return ok(paused=False, message="下载队列已继续")
 
 
 @router.post("/tasks/retry-failed")

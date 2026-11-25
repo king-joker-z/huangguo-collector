@@ -10,6 +10,8 @@
 - 更新检测：重新扫描后标记「有更新」，直接补下新增分集
 - 双站点：黄果（原创/短剧/漫剧）+ 野果（探索分类）
 - 跨站点同名合并：同名剧只保留集数最多的一个版本，重复条目隐藏但文件不删除
+- 标签排除：把题材/自建标签加入排除列表，相关剧集从媒体库、更新、订阅、统计中隐藏
+- 下载队列暂停/继续，当前集完成后不再开始新任务
 - 定时任务：每天/每周指定时间自动全量扫库（最新 + 热播 + 精选 / 野果探索）
 - 订阅追更：订阅的剧在扫库发现新集后自动下载，可单独设置画质
 - 下载目录、目录模板可通过设置页或环境变量指定
@@ -29,6 +31,16 @@
 - **详情页**：封面、评分、题材、简介、下载进度、体积估算、分集网格、NFO 操作；桌面 3 栏，窄屏自动折叠。
 
 > 仅用于个人媒体库整理。内容为成人向 AI 短剧（18+），请遵守站点条款与当地法律法规，不要公开传播。
+
+## 1.6.0 标签排除与队列暂停
+
+- 标签管理页新增「排除标签」：题材标签、自建标签都可排除/恢复。
+- 排除后立即生效：媒体库、搜索、筛选、模块计数、更新提醒、订阅追更、统计、同名合并区都不再出现含该标签的剧。
+- 排除只隐藏，不删除视频/NFO；恢复标签后剧集重新出现。
+- 标签页现在同时展示 49 个题材标签和自建标签，可逐个「筛选 / 排除」。
+- 下载队列新增「暂停队列 / 继续队列」；暂停后当前正在下载的集完成，不再启动新任务。
+- 排除标签会跳过订阅自动下载，避免后台偷偷下载已屏蔽内容。
+- 新增 19 个单测（标签排除 + 队列暂停）。
 
 ## 1.5.0 多站点
 
@@ -288,6 +300,10 @@ huangguo-collector/
 | POST | `/api/fs/mkdir` | 在指定目录下新建文件夹 |
 | GET | `/api/covers` | 集封面补全进度 |
 | POST | `/api/covers/backfill` | `{drama_ids}` 或 `{all:true}` 补全集封面 |
+| GET | `/api/tags` | 标签列表 + 已排除标签 |
+| POST | `/api/excluded-tags` | `{name}` 排除标签 |
+| DELETE | `/api/excluded-tags?name=` | 恢复标签 |
+| POST | `/api/downloads/pause` / `resume` | 暂停 / 继续下载队列 |
 | GET | `/api/site-check` | 测试站点连通性；`?source=huangguo|yeguo` |
 | GET | `/api/tasks` | 队列与历史任务 |
 | POST | `/api/tasks/retry-failed` | 重试全部失败任务 |
@@ -320,12 +336,12 @@ huangguo-collector/
 
 镜像已发布到 Docker Hub（`linux/amd64`，适配 Z4 Pro）：
 
-- **镜像**：`jokermelove/huangguo-collector:1.5.0`（另有 `latest`）
+- **镜像**：`jokermelove/huangguo-collector:1.6.0`（另有 `latest`）
 - **GitHub**：<https://github.com/king-joker-z/huangguo-collector>
 - **Actions**：推送到 `main` 自动构建并推送 Docker Hub，也可在 Actions 页手动 `Run workflow`
 
 ```sh
-docker pull jokermelove/huangguo-collector:1.5.0
+docker pull jokermelove/huangguo-collector:1.6.0
 ```
 
 ### 方式 A：极空间直接拉取镜像（推荐）
@@ -351,7 +367,7 @@ docker compose -f docker-compose.zspace.yml up -d
 本机有 Docker 时：
 
 ```sh
-docker build --platform linux/amd64 -t jokermelove/huangguo-collector:1.5.0 .
+docker build --platform linux/amd64 -t jokermelove/huangguo-collector:1.6.0 .
 # 或
 docker compose up -d --build
 ```
@@ -397,6 +413,7 @@ docker exec huangguo-collector df -h /data /downloads
 ## 13. 免责声明
 
 本项目只做本地采集与媒体库整理，不托管、不分发任何内容。请自行确认内容合法性、年龄限制与站点服务条款；因使用产生的任何后果由使用者承担。
+
 
 
 

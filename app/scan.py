@@ -251,7 +251,7 @@ class ScanManager:
         if self.downloads is None or self.cancel_event.is_set():
             return
         row = self.db.get_drama(drama_id)
-        if row and int(row["is_duplicate"] or 0):
+        if row and (int(row["is_duplicate"] or 0) or self.db.is_tag_excluded(drama_id)):
             return
         subscription = self.db.get_subscription(drama_id)
         if not subscription or not subscription["enabled"] or not subscription["auto_download"]:

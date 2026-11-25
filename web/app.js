@@ -1,4 +1,4 @@
-/* 黄果媒体库 · 前端（无构建依赖） */
+﻿/* 黄果媒体库 · 前端（无构建依赖） */
 (() => {
   'use strict';
 
@@ -43,6 +43,7 @@
     selected: new Set(),
     selectMode: false,
     tags: [],
+    excludedTags: [],
     tagSearch: '',
     stats: {},
     activity: { scan: { state: 'idle' }, tasks: [], summary: {} },
@@ -255,7 +256,7 @@
     if (state.health) {
       const ok = state.health.ffmpeg;
       $('#health-dot').style.background = ok ? 'var(--ok)' : 'var(--accent)';
-      $('#health-text').textContent = ok ? `v1.5.0 · ${state.health.workers || 0} 路下载` : 'ffmpeg 未就绪';
+      $('#health-text').textContent = ok ? `v1.6.0 · ${state.health.workers || 0} 路下载` : 'ffmpeg 未就绪';
     }
   }
 
@@ -283,10 +284,12 @@
     const wrap = $('#tag-list');
     if (!wrap) return;
     const keyword = state.tagSearch.trim().toLowerCase();
+    const excluded = new Set((state.excludedTags || []).map((t) => t.name));
     const siteTags = ((state.stats && state.stats.site_tags) || [])
       .filter((t) => !keyword || t.name.toLowerCase().includes(keyword));
     const customTags = (state.tags || [])
       .slice().sort((a, b) => (b.count || 0) - (a.count || 0))
+      .filter((t) => !excluded.has(t.name))
       .filter((t) => !keyword || t.name.toLowerCase().includes(keyword));
     if (!siteTags.length && !customTags.length) {
       wrap.innerHTML = `<div class="tag-empty">${state.tags.length || (state.stats.site_tags || []).length ? '没有匹配的标签' : '还没有标签'}</div>`;
@@ -321,7 +324,11 @@
   }
 
   async function loadTags() {
-    try { state.tags = (await api('/tags')).tags || []; } catch (_) {}
+    try {
+      const res = await api('/tags');
+      state.tags = res.tags || [];
+      state.excludedTags = res.excluded || [];
+    } catch (_) {}
     renderTagList();
     updateSidebarCounts();
   }
@@ -655,6 +662,7 @@
       ${d.is_duplicate && d.duplicate_preferred ? `<div class="merge-banner">同名剧已保留集数更多的版本：
         <a href="#/drama/${d.duplicate_preferred.id}">${h(d.duplicate_preferred.title)}（${d.duplicate_preferred.total_ep} 集）</a>
         ，当前条目已从媒体库隐藏，文件不会删除。</div>` : ''}
+      ${d.tag_excluded ? '<div class="merge-banner">该剧含有已排除的标签，已从媒体库/更新/订阅中隐藏；在「标签管理」里恢复标签后会重新显示。</div>' : ''}
       <div class="detail-hero">
         <div class="detail-cover">
           ${coverHTML(d)}
@@ -799,10 +807,12 @@
     $('#view').innerHTML = `
       <div class="page-head"><h1>下载队列</h1><p>实时进度、失败重试与历史</p>
         <div class="right">
+          <button class="btn sm" data-action="queue-toggle">${summary.paused ? '▶ 继续队列' : 'Ⅱ 暂停队列'}</button>
           ${failed.length ? '<button class="btn sm pri" data-action="retry-all-failed">重试全部失败</button><button class="btn sm ghost" data-action="clear-failed">清理失败</button>' : ''}
           <button class="btn sm ghost" data-action="tasks-clear">清除已完成</button>
         </div></div>
       <div class="summary-row">
+        <span class="${summary.paused ? 'warn' : 'ok'}">${summary.paused ? '已暂停' : '运行中'}</span>
         <span class="warn">下载中 <b>${summary.downloading || 0}</b></span>
         <span>排队 <b>${summary.queued || 0}</b></span>
         <span class="ok">完成 <b>${summary.done || 0}</b></span>
@@ -1078,23 +1088,63 @@
   // --------------------------------------------------------------------- tags
   async function renderTagsView() {
     await loadTags();
-    const tags = state.tags;
+    const tags = state.tags || [];
+    const excluded = state.excludedTags || [];
+    const excludedNames = new Set(excluded.map((t) => t.name));
+    const siteTags = (state.stats && state.stats.site_tags) || [];
+    const allNames = [...new Set([...siteTags.map((t) => t.name), ...tags.map((t) => t.name), ...excluded.map((t) => t.name)])];
     $('#view').innerHTML = `
-      <div class="page-head"><h1>标签管理</h1><p>整理媒体库，标签会显示在卡片与详情页</p></div>
+      <div class="page-head"><h1>标签管理</h1><p>整理媒体库；排除的标签会全局隐藏相关剧集</p></div>
+
       <div class="panel" style="margin-bottom:14px">
-        <div style="display:flex;gap:9px;flex-wrap:wrap;align-items:center">
+        <h2 style="font-size:13px;margin-bottom:6px">排除标签</h2>
+        <p class="hint" style="margin-bottom:9px">加入后，含该标签的剧不再出现在媒体库、更新提醒、订阅和统计中。恢复后重新显示，文件不会删除。</p>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          <input id="exclude-tag-input" list="all-tag-names" type="text" placeholder="输入或选择要排除的标签，例如：乱伦 / 已下载" style="height:36px;padding:0 11px;border-radius:8px;border:1px solid var(--line2);background:var(--bg2);outline:none;min-width:240px;flex:1;max-width:380px">
+          <datalist id="all-tag-names">${allNames.map((n) => `<option value="${h(n)}"></option>`).join('')}</datalist>
+          <button class="btn pri" data-action="exclude-tag">排除标签</button>
+        </div>
+        <div class="excluded-list" style="margin-top:10px">
+          ${excluded.length ? excluded.map((t) => `<span class="excluded-chip">${h(t.name)}<button data-action="restore-tag" data-name="${h(t.name)}" title="恢复显示">恢复</button></span>`).join('') : '<span class="hint">还没有排除标签</span>'}
+        </div>
+      </div>
+
+      <div class="panel" style="margin-bottom:14px">
+        <h2 style="font-size:13px;margin-bottom:9px">题材标签 <small style="color:var(--dim);font-weight:400">${siteTags.length} 个</small></h2>
+        <div class="tag-grid">
+          ${siteTags.length ? siteTags.map((tag) => `<div class="tag-card">
+            <span class="tag-dot" style="background:#7db6d9"></span>
+            <b>${h(tag.name)}</b><small>${tag.count} 部</small>
+            <button class="icon" data-action="set-site-tag" data-site-tag="${h(tag.name)}" title="筛选">⌕</button>
+            <button class="icon" data-action="exclude-tag" data-name="${h(tag.name)}" title="排除该标签">⊘</button>
+          </div>`).join('') : '<div class="tag-empty">暂无可排除的题材标签</div>'}
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2 style="font-size:13px;margin-bottom:9px">自建标签</h2>
+        <div style="display:flex;gap:9px;flex-wrap:wrap;align-items:center;margin-bottom:12px">
           <input id="new-tag-name" type="text" placeholder="新标签，例如：精品 / 待二刷" style="height:36px;padding:0 11px;border-radius:8px;border:1px solid var(--line2);background:var(--bg2);outline:none;min-width:240px;flex:1;max-width:380px">
           <input id="new-tag-color" type="color" value="#ff5c7a" style="width:36px;height:36px;border:1px solid var(--line2);border-radius:8px;background:var(--bg2);padding:3px">
           <button class="btn pri" data-action="tag-create">创建标签</button>
         </div>
-      </div>
-      <div class="tag-grid">
-        ${tags.length ? tags.map((tag) => `<div class="tag-card" data-action="set-tag" data-tag="${h(tag.name)}">
-          <span class="tag-dot" style="background:${h(tag.color)}"></span>
-          <b>${h(tag.name)}</b><small>${tag.count} 部${tag.kind === 'system' ? ' · 自动' : ''}</small>
-          ${tag.kind === 'system' ? '' : `<button class="icon" data-action="tag-delete" data-id="${tag.id}" title="删除">×</button>`}
-        </div>`).join('') : emptyHTML('还没有标签', '创建一个标签来整理媒体库。', '', '')}
+        <div class="tag-grid">
+          ${tags.length ? tags.filter((tag) => !excludedNames.has(tag.name)).map((tag) => `<div class="tag-card">
+            <span class="tag-dot" style="background:${h(tag.color)}"></span>
+            <b>${h(tag.name)}</b><small>${tag.count} 部${tag.kind === 'system' ? ' · 自动' : ''}</small>
+            <button class="icon" data-action="set-tag" data-tag="${h(tag.name)}" title="筛选">⌕</button>
+            <button class="icon" data-action="exclude-tag" data-name="${h(tag.name)}" title="排除该标签">⊘</button>
+            ${tag.kind === 'system' ? '' : `<button class="icon" data-action="tag-delete" data-id="${tag.id}" title="删除">×</button>`}
+          </div>`).join('') : '<div class="tag-empty">还没有自建标签</div>'}
+        </div>
       </div>`;
+    const input = $('#exclude-tag-input');
+    if (input) input.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        $('[data-action="exclude-tag"]').click();
+      }
+    });
   }
 
   // ----------------------------------------------------------------- settings
@@ -1151,7 +1201,7 @@
               <div class="health-item"><span>下载线程</span><b>${health.workers || 0} 路</b></div>
               <div class="health-item"><span>磁盘剩余</span><b>${fmtBytes(health.disk_free || 0)}</b></div>
               <div class="health-item"><span>媒体库占用</span><b>${fmtBytes((state.stats && state.stats.storage_bytes) || 0)}</b></div>
-              <div class="health-item"><span>服务版本</span><b>${h(health.version || '1.5.0')}</b></div>
+              <div class="health-item"><span>服务版本</span><b>${h(health.version || '1.6.0')}</b></div>
             </div>
             <div style="display:flex;gap:6px;margin-top:10px">
               <button class="btn sm" data-action="site-check" data-source="huangguo">测试黄果</button>
@@ -1953,11 +2003,50 @@
         } catch (err) { toast(err.message, 'err'); }
         break;
       }
+      case 'queue-toggle': {
+        const paused = !!((state.activity && state.activity.summary) || {}).paused;
+        try {
+          const res = await api(paused ? '/downloads/resume' : '/downloads/pause', { method: 'POST' });
+          toast(res.message || (paused ? '已继续队列' : '已暂停队列'), 'ok');
+          await refreshActivity();
+          await renderDownloadsView();
+        } catch (err) { toast(err.message, 'err'); }
+        break;
+      }
       case 'tasks-clear':
         await api('/tasks/clear', { method: 'POST' });
         toast('已清理任务记录', 'ok');
         renderDownloadsView();
         break;
+      case 'exclude-tag': {
+        const input = $('#exclude-tag-input');
+        const name = String(el.dataset.name || (input ? input.value : '') || '').trim();
+        if (!name) { toast('请输入要排除的标签', 'err'); break; }
+        try {
+          const res = await api('/excluded-tags', { method: 'POST', body: { name } });
+          state.excludedTags = res.excluded || [];
+          if (state.tag === name) state.tag = '';
+          if (state.siteTag === name) state.siteTag = '';
+          await loadStats();
+          await loadTags();
+          toast(res.message || '已排除标签', 'ok');
+          renderTagsView();
+        } catch (err) { toast(err.message, 'err'); }
+        break;
+      }
+      case 'restore-tag': {
+        const name = String(el.dataset.name || '').trim();
+        if (!name) break;
+        try {
+          const res = await api(`/excluded-tags?name=${encodeURIComponent(name)}`, { method: 'DELETE' });
+          state.excludedTags = res.excluded || [];
+          await loadStats();
+          await loadTags();
+          toast(res.message || '已恢复标签', 'ok');
+          renderTagsView();
+        } catch (err) { toast(err.message, 'err'); }
+        break;
+      }
       case 'tag-create': {
         const name = $('#new-tag-name').value.trim();
         const color = $('#new-tag-color').value;
@@ -2173,6 +2262,7 @@
 
   boot();
 })();
+
 
 
 

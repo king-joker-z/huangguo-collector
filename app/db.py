@@ -92,6 +92,11 @@ CREATE TABLE IF NOT EXISTS drama_tags (
 );
 CREATE INDEX IF NOT EXISTS idx_drama_tags_tag ON drama_tags(tag_id);
 
+CREATE TABLE IF NOT EXISTS excluded_tags (
+    name TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS tasks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     drama_id INTEGER NOT NULL REFERENCES dramas(id) ON DELETE CASCADE,
@@ -158,6 +163,24 @@ CREATE TABLE IF NOT EXISTS scan_runs (
 );
 """
 
+VISIBLE_VIEW = """
+CREATE VIEW IF NOT EXISTS visible_dramas AS
+SELECT d.* FROM dramas d
+WHERE d.is_duplicate=0
+  AND NOT EXISTS (
+    SELECT 1 FROM json_each(
+      CASE WHEN d.tags_json IS NULL OR d.tags_json='' THEN '[]' ELSE d.tags_json END
+    ) je
+    JOIN excluded_tags et ON et.name=je.value
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM drama_tags dt
+    JOIN tags t ON t.id=dt.tag_id
+    JOIN excluded_tags et ON et.name=t.name
+    WHERE dt.drama_id=d.id
+  )
+"""
+
 
 def now_str() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -167,6 +190,10 @@ def title_key(title: str) -> str:
     """跨站点同名判断：全角转半角、去空白和标点、忽略大小写。"""
     text = unicodedata.normalize("NFKC", str(title or "")).lower()
     return re.sub(r"[\s\W_]+", "", text, flags=re.UNICODE)
+
+
+def normalize_tag(name: str) -> str:
+    return unicodedata.normalize("NFKC", str(name or "")).strip()
 
 
 def json_dumps(value: Any) -> str:
@@ -236,6 +263,7 @@ class Database:
             self.conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_dramas_duplicate ON dramas(is_duplicate)"
             )
+            self.conn.execute(VISIBLE_VIEW)
             self.conn.commit()
             self.resolve_all_duplicates()
 
@@ -526,6 +554,67 @@ class Database:
         return {"total_ep": total, "done_ep": done}
 
     # ------------------------------------------------------------------- tags
+    def excluded_tag_names(self) -> list[str]:
+        return [str(r["name"]) for r in self.query("SELECT name FROM excluded_tags ORDER BY name")]
+
+    def list_excluded_tags(self) -> list[dict]:
+        return [dict(r) for r in self.query(
+            "SELECT name,created_at FROM excluded_tags ORDER BY created_at DESC"
+        )]
+
+    def add_excluded_tag(self, name: str) -> None:
+        name = normalize_tag(name)
+        if not name:
+            raise ValueError("标签名不能为空")
+        self.execute(
+            "INSERT OR IGNORE INTO excluded_tags(name,created_at) VALUES(?,?)",
+            (name, now_str()),
+        )
+        self.invalidate_stats()
+
+    def remove_excluded_tag(self, name: str) -> None:
+        self.execute("DELETE FROM excluded_tags WHERE name=?", (normalize_tag(name),))
+        self.invalidate_stats()
+
+    def invalidate_stats(self) -> None:
+        with self._stats_lock:
+            self._stats_cache = None
+
+    def _excluded_clause(self, alias: str = "d") -> tuple[str, list[str]]:
+        names = self.excluded_tag_names()
+        if not names:
+            return "", []
+        placeholders = ",".join("?" for _ in names)
+        clause = f"""NOT EXISTS (
+            SELECT 1 FROM json_each(
+              CASE WHEN {alias}.tags_json IS NULL OR {alias}.tags_json='' THEN '[]' ELSE {alias}.tags_json END
+            ) je WHERE je.value IN ({placeholders})
+          ) AND NOT EXISTS (
+            SELECT 1 FROM drama_tags dt JOIN tags t ON t.id=dt.tag_id
+            WHERE dt.drama_id={alias}.id AND t.name IN ({placeholders})
+          )"""
+        return clause, [*names, *names]
+
+    def is_tag_excluded(self, drama_id: int) -> bool:
+        names = self.excluded_tag_names()
+        if not names:
+            return False
+        placeholders = ",".join("?" for _ in names)
+        row = self.query_one(
+            f"""SELECT 1 AS hit FROM dramas d WHERE d.id=? AND (
+              EXISTS (
+                SELECT 1 FROM json_each(
+                  CASE WHEN d.tags_json IS NULL OR d.tags_json='' THEN '[]' ELSE d.tags_json END
+                ) je WHERE je.value IN ({placeholders})
+              ) OR EXISTS (
+                SELECT 1 FROM drama_tags dt JOIN tags t ON t.id=dt.tag_id
+                WHERE dt.drama_id=d.id AND t.name IN ({placeholders})
+              )
+            )""",
+            [drama_id, *names, *names],
+        )
+        return bool(row)
+
     def ensure_tag(self, name: str, color: str = "#e5484d", kind: str = "custom") -> int:
         row = self.query_one("SELECT id FROM tags WHERE name=?", (name,))
         if row:
@@ -541,7 +630,8 @@ class Database:
             """SELECT t.*, (SELECT COUNT(*) FROM drama_tags dt WHERE dt.tag_id=t.id) AS count
                FROM tags t ORDER BY t.kind='system' DESC, t.id"""
         )
-        return [dict(r) for r in rows]
+        excluded = set(self.excluded_tag_names())
+        return [{**dict(r), "excluded": str(r["name"]) in excluded} for r in rows]
 
     def tags_for_drama(self, drama_id: int) -> list[dict]:
         rows = self.query(
@@ -632,8 +722,7 @@ class Database:
                  (SELECT COUNT(*) FROM episodes e WHERE e.drama_id=d.id AND e.state='done') AS done_ep,
                  (SELECT COUNT(*) FROM episodes e WHERE e.drama_id=d.id) AS ep_rows,
                  (SELECT COUNT(*) FROM tasks t WHERE t.drama_id=d.id AND t.state IN ('queued','downloading')) AS active_tasks
-               FROM subscriptions s JOIN dramas d ON d.id=s.drama_id
-               WHERE d.is_duplicate=0
+               FROM subscriptions s JOIN visible_dramas d ON d.id=s.drama_id
                ORDER BY d.has_update DESC, s.created_at DESC"""
         )
         items = [self._drama_dict(r) for r in rows]
@@ -798,6 +887,11 @@ class Database:
         params: list[Any] = []
         if not include_duplicates:
             where.append("x.is_duplicate=0")
+        else:
+            excluded_clause, excluded_params = self._excluded_clause("x")
+            if excluded_clause:
+                where.append(excluded_clause)
+                params.extend(excluded_params)
         if source in SOURCES:
             where.append("x.source=?")
             params.append(source)
@@ -852,7 +946,8 @@ class Database:
             "progress": "CASE WHEN x.total_ep>0 THEN x.done_ep*1.0/x.total_ep ELSE 0 END DESC, x.id DESC",
         }.get(sort, "x.last_scraped_at DESC, x.id DESC")
 
-        base = """
+        base_table = "dramas" if include_duplicates else "visible_dramas"
+        base = f"""
             SELECT d.*,
                 (SELECT COUNT(*) FROM episodes e WHERE e.drama_id=d.id AND e.state='done') AS done_ep,
                 (SELECT COUNT(*) FROM episodes e WHERE e.drama_id=d.id) AS ep_rows,
@@ -860,7 +955,7 @@ class Database:
                 (SELECT COUNT(*) FROM subscriptions s WHERE s.drama_id=d.id AND s.enabled=1) AS subscribed_flag,
                 (SELECT s.quality FROM subscriptions s WHERE s.drama_id=d.id LIMIT 1) AS sub_quality,
                 (SELECT s.auto_download FROM subscriptions s WHERE s.drama_id=d.id LIMIT 1) AS sub_auto
-            FROM dramas d
+            FROM {base_table} d
         """
         where_sql = (" WHERE " + " AND ".join(where)) if where else ""
         count_row = self.query_one(f"SELECT COUNT(*) AS n FROM ({base}) x{where_sql}", params)
@@ -893,6 +988,7 @@ class Database:
         if not row:
             return None
         data = self._drama_dict(row)
+        data["tag_excluded"] = self.is_tag_excluded(drama_id)
         eps = [dict(e) for e in self.get_episodes(drama_id)]
         for e in eps:
             e["file_name"] = e["file_path"].replace("\\", "/").rsplit("/", 1)[-1] if e["file_path"] else ""
@@ -969,7 +1065,7 @@ class Database:
                 (SELECT COUNT(*) FROM subscriptions s WHERE s.drama_id=d.id AND s.enabled=1) AS subscribed_flag,
                 (SELECT s.quality FROM subscriptions s WHERE s.drama_id=d.id LIMIT 1) AS sub_quality,
                 (SELECT s.auto_download FROM subscriptions s WHERE s.drama_id=d.id LIMIT 1) AS sub_auto
-               FROM dramas d WHERE d.has_update=1 AND d.is_duplicate=0
+               FROM visible_dramas d WHERE d.has_update=1
                ORDER BY d.updated_at DESC LIMIT ?""",
             (limit,),
         )
@@ -986,20 +1082,18 @@ class Database:
                 cached = self._stats_cache
                 if cached and now_mono - cached[0] < ttl:
                     return copy.deepcopy(cached[1])
-        total = int(self.query_one("SELECT COUNT(*) n FROM dramas WHERE is_duplicate=0")["n"])
+        total = int(self.query_one("SELECT COUNT(*) n FROM visible_dramas")["n"])
         by_module = {
             r["module"]: int(r["n"])
             for r in self.query(
                 "SELECT jm.value AS module, COUNT(*) AS n "
-                "FROM dramas d, json_each(d.modules_json) jm "
-                "WHERE d.is_duplicate=0 GROUP BY jm.value"
+                "FROM visible_dramas d, json_each(d.modules_json) jm GROUP BY jm.value"
             )
         }
         by_source = {
             r["source"]: int(r["n"])
             for r in self.query(
-                "SELECT source, COUNT(*) AS n FROM dramas "
-                "WHERE is_duplicate=0 GROUP BY source"
+                "SELECT source, COUNT(*) AS n FROM visible_dramas GROUP BY source"
             )
         }
         status_row = self.query_one(
@@ -1015,7 +1109,7 @@ class Database:
                  SELECT d.id,d.total_ep,d.has_update,d.favorite,
                    (SELECT COUNT(*) FROM episodes e WHERE e.drama_id=d.id AND e.state='done') AS done_ep,
                    (SELECT COUNT(*) FROM tasks t WHERE t.drama_id=d.id AND t.state IN ('queued','downloading')) AS active_tasks
-                 FROM dramas d WHERE d.is_duplicate=0
+                 FROM visible_dramas d
                ) x"""
         )
         status = {
@@ -1031,21 +1125,20 @@ class Database:
         partial = status["partial"]
         updates = status["update"]
         episodes_done = int(self.query_one(
-            "SELECT COUNT(*) n FROM episodes e JOIN dramas d ON d.id=e.drama_id "
-            "WHERE e.state='done' AND d.is_duplicate=0"
+            "SELECT COUNT(*) n FROM episodes e JOIN visible_dramas d ON d.id=e.drama_id "
+            "WHERE e.state='done'"
         )["n"])
         episodes_total = int(self.query_one(
-            "SELECT COUNT(*) n FROM episodes e JOIN dramas d ON d.id=e.drama_id "
-            "WHERE d.is_duplicate=0"
+            "SELECT COUNT(*) n FROM episodes e JOIN visible_dramas d ON d.id=e.drama_id"
         )["n"])
         storage = int(self.query_one("SELECT COALESCE(SUM(file_size),0) n FROM episodes WHERE state='done'")["n"])
         active = int(self.query_one("SELECT COUNT(*) n FROM tasks WHERE state IN ('queued','downloading')")["n"])
         subscribed = int(self.query_one(
-            "SELECT COUNT(*) n FROM subscriptions s JOIN dramas d ON d.id=s.drama_id "
-            "WHERE s.enabled=1 AND d.is_duplicate=0"
+            "SELECT COUNT(*) n FROM subscriptions s JOIN visible_dramas d ON d.id=s.drama_id "
+            "WHERE s.enabled=1"
         )["n"])
         sub_updates = int(self.query_one(
-            "SELECT COUNT(*) n FROM dramas d WHERE d.has_update=1 AND d.is_duplicate=0 AND EXISTS "
+            "SELECT COUNT(*) n FROM visible_dramas d WHERE d.has_update=1 AND EXISTS "
             "(SELECT 1 FROM subscriptions s WHERE s.drama_id=d.id AND s.enabled=1)"
         )["n"])
         duplicates = int(self.query_one(
@@ -1056,7 +1149,7 @@ class Database:
         years = [
             {"year": int(r["year"]), "count": int(r["n"])}
             for r in self.query(
-                "SELECT year, COUNT(*) n FROM dramas WHERE year IS NOT NULL AND is_duplicate=0 "
+                "SELECT year, COUNT(*) n FROM visible_dramas WHERE year IS NOT NULL "
                 "GROUP BY year ORDER BY year DESC LIMIT 12"
             )
         ]
@@ -1064,8 +1157,8 @@ class Database:
             {"name": r["name"], "count": int(r["count"])}
             for r in self.query(
                 """SELECT je.value AS name, COUNT(*) AS count
-                   FROM dramas d, json_each(d.tags_json) je
-                   WHERE d.tags_json IS NOT NULL AND d.tags_json <> '' AND d.is_duplicate=0
+                   FROM visible_dramas d, json_each(d.tags_json) je
+                   WHERE d.tags_json IS NOT NULL AND d.tags_json <> ''
                    GROUP BY je.value ORDER BY count DESC, je.value LIMIT 48"""
             )
         ]
