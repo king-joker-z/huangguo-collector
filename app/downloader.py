@@ -217,17 +217,19 @@ class DownloadManager:
 
         quality = task["quality"] or self.settings.get("quality", "hevc")
         last_error = ""
-        for attempt in range(1, 4):
+        for attempt in range(1, 5):
             if task_id in self.canceled or self.stop_event.is_set():
                 self._finish_canceled(task_id, drama, episode)
                 return
             # HEVC 原画在部分 ffmpeg/容器环境可能不兼容；第二次起自动回退 H264。
             attempt_quality = "h264" if quality == "hevc" and attempt >= 2 else quality
-            include_audio = attempt < 3
+            transcode_video = attempt >= 3
+            include_audio = attempt < 4
             try:
                 self._download_once(
                     task_id, dict(drama), dict(episode), attempt_quality,
                     include_audio=include_audio,
+                    transcode_video=transcode_video,
                 )
                 return
             except CanceledError:
@@ -236,6 +238,8 @@ class DownloadManager:
             except Exception as exc:
                 last_error = str(exc)
                 note = "（已回退 H264）" if attempt_quality != quality else ""
+                if transcode_video:
+                    note += "（视频转码兜底）"
                 if not include_audio:
                     note += "（无音轨兜底）"
                 self.db.update_task(task_id, error=f"第{attempt}次失败{note}: {last_error}")
@@ -278,7 +282,7 @@ class DownloadManager:
 
     # ------------------------------------------------------------------ one file
     def _download_once(self, task_id: int, drama: dict, episode: dict, quality: str,
-                       include_audio: bool = True) -> None:
+                       include_audio: bool = True, transcode_video: bool = False) -> None:
         source = str(drama.get("source") or "huangguo")
         scraper = self.scrapers.get(source) or self.scraper
         if scraper is None:
@@ -313,6 +317,8 @@ class DownloadManager:
             "-nostats",
             "-headers", header_text,
             "-rw_timeout", "120000000",
+            "-analyzeduration", "100M",
+            "-probesize", "100M",
             "-i", url,
             "-map", "0:v:0",
         ]
@@ -330,14 +336,24 @@ class DownloadManager:
             else:
                 cmd += ["-an"]
         else:
-            # 视频原样复制；音频统一转 AAC，避开 ADTS/AAC 头不兼容导致
-            # aac_adtstoasc 在 MP4 封装时报 Invalid data。
-            cmd += ["-c:v", "copy"]
+            if transcode_video:
+                # 某些 HLS 流的宽高/SPS 在 copy 时不可用，导致
+                # "dimensions not set / Could not write header"，转码可补齐参数。
+                cmd += [
+                    "-c:v", "libx264",
+                    "-preset", "veryfast",
+                    "-crf", "20",
+                    "-pix_fmt", "yuv420p",
+                ]
+            else:
+                # 视频原样复制；音频统一转 AAC，避开 ADTS/AAC 头不兼容导致
+                # aac_adtstoasc 在 MP4 封装时报 Invalid data。
+                cmd += ["-c:v", "copy"]
             if include_audio:
                 cmd += ["-c:a", "aac", "-b:a", "128k"]
             else:
                 cmd += ["-an"]
-            if use_hevc:
+            if use_hevc and not transcode_video:
                 cmd += ["-tag:v", "hvc1"]
         cmd += ["-movflags", "+faststart", "-max_muxing_queue_size", "2048", "-f", "mp4", str(tmp)]
 

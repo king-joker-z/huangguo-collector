@@ -1,4 +1,4 @@
-/* 黄果媒体库 · 前端（无构建依赖） */
+﻿/* 黄果媒体库 · 前端（无构建依赖） */
 (() => {
   'use strict';
 
@@ -257,7 +257,7 @@
     if (state.health) {
       const ok = state.health.ffmpeg;
       $('#health-dot').style.background = ok ? 'var(--ok)' : 'var(--accent)';
-      $('#health-text').textContent = ok ? `v1.7.0 · ${state.health.workers || 0} 路下载` : 'ffmpeg 未就绪';
+      $('#health-text').textContent = ok ? `v1.7.1 · ${state.health.workers || 0} 路下载` : 'ffmpeg 未就绪';
     }
   }
 
@@ -1231,7 +1231,7 @@
               <div class="health-item"><span>下载线程</span><b>${health.workers || 0} 路</b></div>
               <div class="health-item"><span>磁盘剩余</span><b>${fmtBytes(health.disk_free || 0)}</b></div>
               <div class="health-item"><span>媒体库占用</span><b>${fmtBytes((state.stats && state.stats.storage_bytes) || 0)}</b></div>
-              <div class="health-item"><span>服务版本</span><b>${h(health.version || '1.7.0')}</b></div>
+              <div class="health-item"><span>服务版本</span><b>${h(health.version || '1.7.1')}</b></div>
             </div>
             <div style="display:flex;gap:6px;margin-top:10px">
               <button class="btn sm" data-action="site-check" data-source="huangguo">测试黄果</button>
@@ -2366,6 +2366,7 @@
 
   boot();
 })();
+
 
 
 

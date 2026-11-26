@@ -1,4 +1,4 @@
-﻿# 黄果采集器 · Huangguo Collector
+# 黄果采集器 · Huangguo Collector
 
 面向 `huangguoai.com`（黄果短剧）和 `yeguodj.com`（野果短剧）的本地采集 + 媒体库管理工具。黄果按原创 / 短剧 / 漫剧三个模块采集，野果按探索分类全量采集；两站同名剧自动保留集数更多的版本。提供：
 
@@ -32,6 +32,19 @@
 - **详情页**：封面、评分、题材、简介、下载进度、体积估算、分集网格、NFO 操作；桌面 3 栏，窄屏自动折叠。
 
 > 仅用于个人媒体库整理。内容为成人向 AI 短剧（18+），请遵守站点条款与当地法律法规，不要公开传播。
+
+## 1.7.1 视频头/宽高兜底
+
+- 修复 `[mp4] dimensions not set / Could not write header`：部分 HLS 流在 `-c:v copy` 时拿不到宽高/SPS。
+- 输入阶段增加 `-analyzeduration 100M`、`-probesize 100M`，让 ffmpeg 先探测完整流参数。
+- 下载重试升级为 4 层：
+  1. 原画 HEVC + AAC
+  2. 回退 H264 + AAC
+  3. 视频转码 H264 + AAC
+  4. 视频转码、无音轨
+- 转码兜底会补齐宽高和编码参数，输出标准 MP4。
+- 音频 ADTS 问题继续走 AAC 转码兜底。
+- 19 个单测全部通过。
 
 ## 1.7.0 批量订阅
 
@@ -357,12 +370,12 @@ huangguo-collector/
 
 镜像已发布到 Docker Hub（`linux/amd64`，适配 Z4 Pro）：
 
-- **镜像**：`jokermelove/huangguo-collector:1.7.0`（另有 `latest`）
+- **镜像**：`jokermelove/huangguo-collector:1.7.1`（另有 `latest`）
 - **GitHub**：<https://github.com/king-joker-z/huangguo-collector>
 - **Actions**：推送到 `main` 自动构建并推送 Docker Hub，也可在 Actions 页手动 `Run workflow`
 
 ```sh
-docker pull jokermelove/huangguo-collector:1.7.0
+docker pull jokermelove/huangguo-collector:1.7.1
 ```
 
 ### 方式 A：极空间直接拉取镜像（推荐）
@@ -388,7 +401,7 @@ docker compose -f docker-compose.zspace.yml up -d
 本机有 Docker 时：
 
 ```sh
-docker build --platform linux/amd64 -t jokermelove/huangguo-collector:1.7.0 .
+docker build --platform linux/amd64 -t jokermelove/huangguo-collector:1.7.1 .
 # 或
 docker compose up -d --build
 ```
@@ -434,6 +447,7 @@ docker exec huangguo-collector df -h /data /downloads
 ## 13. 免责声明
 
 本项目只做本地采集与媒体库整理，不托管、不分发任何内容。请自行确认内容合法性、年龄限制与站点服务条款；因使用产生的任何后果由使用者承担。
+
 
 
 
