@@ -50,7 +50,7 @@ jobs:
           images: ${{ secrets.DOCKERHUB_USERNAME }}/huangguo-collector
           tags: |
             type=raw,value=latest
-            type=raw,value=1.9.0
+            type=raw,value=1.9.1
             type=sha,prefix=sha-
 
       - name: Build and push
@@ -67,7 +67,7 @@ jobs:
       - name: Smoke test image
         run: |
           set -euo pipefail
-          IMAGE="${{ secrets.DOCKERHUB_USERNAME }}/huangguo-collector:1.9.0"
+          IMAGE="${{ secrets.DOCKERHUB_USERNAME }}/huangguo-collector:1.9.1"
           docker pull "$IMAGE"
           docker run -d --name hg-smoke -p 8765:8765 -e TZ=Asia/Shanghai "$IMAGE"
           for i in $(seq 1 30); do
@@ -80,4 +80,5 @@ jobs:
           grep -q '"ffmpeg":true' /tmp/health.json
           docker exec hg-smoke ffmpeg -version | head -1
           docker rm -f hg-smoke
+
 

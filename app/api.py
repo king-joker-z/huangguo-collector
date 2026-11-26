@@ -410,6 +410,57 @@ def duplicates():
     return ok(groups=groups, total=len(groups))
 
 
+@router.post("/duplicates/batch")
+def batch_duplicates(payload: dict = Body(...)):
+    ids = [int(i) for i in payload.get("ids", [])]
+    action = str(payload.get("action") or "")
+    if not ids:
+        fail("没有选择版本")
+    if action not in ("keep", "unkeep", "subscribe", "download"):
+        fail("未知的批量操作")
+    quality = str(payload.get("quality") or settings.get("quality", "hevc"))
+    if quality not in ("hevc", "h264", "720p"):
+        quality = "hevc"
+    auto = bool(payload.get("auto_download", True))
+    changed = skipped = queued = failed = 0
+    for drama_id in ids:
+        row = db.get_drama(drama_id)
+        if not row or db.is_tag_excluded(drama_id):
+            skipped += 1
+            continue
+        try:
+            if action in ("keep", "unkeep"):
+                db.set_duplicate_keep(drama_id, action == "keep")
+                changed += 1
+            elif action == "subscribe":
+                if int(row["is_duplicate"] or 0):
+                    db.set_duplicate_keep(drama_id, True)
+                db.set_subscription(drama_id, True, quality, auto)
+                changed += 1
+            elif action == "download":
+                if int(row["is_duplicate"] or 0):
+                    db.set_duplicate_keep(drama_id, True)
+                _ensure_episodes(drama_id)
+                result = downloads.enqueue_all(drama_id, quality)
+                queued += int(result.get("queued") or 0)
+                changed += 1
+        except Exception:
+            failed += 1
+    if action == "keep":
+        message = f"已独立保留 {changed} 个版本，跳过 {skipped} 个"
+    elif action == "unkeep":
+        message = f"已取消独立 {changed} 个版本，跳过 {skipped} 个"
+    elif action == "subscribe":
+        message = f"已订阅 {changed} 个版本，跳过 {skipped} 个"
+    else:
+        message = f"已入队 {queued} 集，处理 {changed} 个版本" + (f"，失败 {failed} 个" if failed else "")
+    return ok(
+        groups=db.list_duplicate_groups(),
+        changed=changed, skipped=skipped, queued=queued, failed=failed,
+        message=message,
+    )
+
+
 @router.post("/duplicates/{drama_id}/prefer")
 def prefer_duplicate(drama_id: int, payload: dict | None = Body(None)):
     payload = payload or {}

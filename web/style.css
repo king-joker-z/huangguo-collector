@@ -634,12 +634,20 @@ body.modal-open { overflow: hidden; }
 .excluded-chip button:hover { color: #fff; text-decoration: underline; }
 
 /* ----------------------------------------------------------- duplicates */
+.dup-toolbar { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; padding: 9px 11px; margin-bottom: 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+.dup-toolbar > span { color: var(--muted); font-size: 11px; }
+.dup-toolbar > span b { color: var(--accent); }
+.dup-toolbar .divider { width: 1px; height: 18px; background: var(--line); }
+.dup-toolbar .dup-hint { color: var(--dim); font-size: 10px; margin-left: auto; }
 .dup-group { border: 1px solid var(--line); border-radius: 12px; background: var(--panel); padding: 12px; margin-bottom: 10px; }
 .dup-head { display: flex; align-items: center; gap: 8px; margin-bottom: 9px; }
 .dup-head b { font-size: 13.5px; }
 .dup-head span { color: var(--dim); font-size: 10.5px; }
 .dup-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 8px; }
-.dup-card { display: flex; align-items: center; gap: 9px; padding: 8px; border-radius: 9px; border: 1px solid var(--line); background: var(--bg2); }
+.dup-card { display: flex; align-items: center; gap: 9px; padding: 8px; border-radius: 9px; border: 1px solid var(--line); background: var(--bg2); position: relative; }
+.dup-card.selected { border-color: rgba(255, 92, 122, .55); background: rgba(255, 92, 122, .06); }
+.dup-check { position: absolute; top: 6px; left: 6px; z-index: 2; display: flex; background: rgba(10, 12, 17, .75); border-radius: 4px; padding: 2px; }
+.dup-check input { accent-color: var(--accent); width: 13px; height: 13px; cursor: pointer; }
 .dup-card.hidden-version { opacity: .62; border-style: dashed; }
 .dup-card.preferred { border-color: rgba(61, 220, 151, .25); }
 .dup-card.kept-version { border-color: rgba(91, 157, 255, .38); }

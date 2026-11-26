@@ -1,4 +1,4 @@
-/* 黄果媒体库 · 前端（无构建依赖） */
+﻿/* 黄果媒体库 · 前端（无构建依赖） */
 (() => {
   'use strict';
 
@@ -58,6 +58,7 @@
     subscriptions: [],
     schedules: [],
     duplicates: [],
+    dupSelected: new Set(),
     scanRuns: [],
     covers: { state: 'idle' },
     lastCoverState: 'idle',
@@ -263,7 +264,7 @@
     if (state.health) {
       const ok = state.health.ffmpeg;
       $('#health-dot').style.background = ok ? 'var(--ok)' : 'var(--accent)';
-      $('#health-text').textContent = ok ? `v1.9.0 · ${state.health.workers || 0} 路下载` : 'ffmpeg 未就绪';
+      $('#health-text').textContent = ok ? `v1.9.1 · ${state.health.workers || 0} 路下载` : 'ffmpeg 未就绪';
     }
   }
 
@@ -1183,6 +1184,24 @@
     }
   }
 
+  function syncDupSelection() {
+    const count = state.dupSelected.size;
+    const label = $('#dup-selected-count');
+    if (label) label.textContent = count;
+    $$('.dup-card[data-dup-id]').forEach((card) => {
+      const id = Number(card.dataset.dupId);
+      const selected = state.dupSelected.has(id);
+      card.classList.toggle('selected', selected);
+      const check = card.querySelector('input[data-action="dup-check"]');
+      if (check) check.checked = selected;
+    });
+    $$('[data-action^="dup-batch-"]').forEach((btn) => { btn.disabled = count === 0; });
+  }
+
+  function allDuplicateItems() {
+    return (state.duplicates || []).flatMap((g) => g.items || []);
+  }
+
   async function renderDuplicatesView() {
     const token = ++renderToken;
     $('#view').innerHTML = '<div class="skeleton" style="height:120px;border-radius:12px"></div>';
@@ -1190,13 +1209,28 @@
       const res = await api('/duplicates');
       if (token !== renderToken) return;
       state.duplicates = res.groups || [];
+      const existingIds = new Set(state.duplicates.flatMap((g) => g.items.map((i) => i.id)));
+      state.dupSelected = new Set([...state.dupSelected].filter((id) => existingIds.has(id)));
       $('#view').innerHTML = `
         <div class="page-head"><h1>重复剧</h1><p>同名剧默认只展示一个版本；内容不同的可「独立保留」，目录名会自动带站点 ID 防止覆盖</p></div>
+        <div class="dup-toolbar">
+          <span>已选 <b id="dup-selected-count">${state.dupSelected.size}</b> 个版本</span>
+          <button class="btn sm ghost" data-action="dup-select-all">全选</button>
+          <button class="btn sm ghost" data-action="dup-select-hidden">全选隐藏</button>
+          <button class="btn sm ghost" data-action="dup-select-clear">清空</button>
+          <span class="divider"></span>
+          <button class="btn sm" data-action="dup-batch-keep">独立保留</button>
+          <button class="btn sm ghost" data-action="dup-batch-unkeep">取消独立</button>
+          <button class="btn sm" data-action="dup-batch-subscribe">批量订阅</button>
+          <button class="btn sm pri" data-action="dup-batch-download">批量下载</button>
+          <span class="dup-hint">批量订阅/下载会自动独立保留隐藏版本</span>
+        </div>
         ${state.duplicates.length ? state.duplicates.map((group) => `
           <div class="dup-group">
             <div class="dup-head"><b>${h(group.title)}</b><span>${group.items.length} 个版本</span>${group.manual ? '<span class="pill warn">手动指定</span>' : ''}</div>
             <div class="dup-grid">
-              ${group.items.map((item) => `<div class="dup-card ${item.is_duplicate ? 'hidden-version' : 'preferred'} ${item.keep_separate ? 'kept-version' : ''}">
+              ${group.items.map((item) => `<div class="dup-card ${item.is_duplicate ? 'hidden-version' : 'preferred'} ${item.keep_separate ? 'kept-version' : ''} ${state.dupSelected.has(item.id) ? 'selected' : ''}" data-dup-id="${item.id}">
+                <label class="dup-check" title="选择"><input type="checkbox" data-action="dup-check" data-id="${item.id}" ${state.dupSelected.has(item.id) ? 'checked' : ''}></label>
                 <img src="${h(item.cover || '')}" alt="" onerror="this.style.visibility='hidden'">
                 <div class="dup-main">
                   <div class="dup-title">${h(item.title)}</div>
@@ -1218,6 +1252,7 @@
             </div>
           </div>`).join('') : emptyHTML('没有同名重复剧', '当前媒体库没有同名分组。', '', '')}
       `;
+      syncDupSelection();
     } catch (err) {
       if (token === renderToken) $('#view').innerHTML = emptyHTML('重复剧加载失败', err.message, '重试', 'reload');
     }
@@ -1338,7 +1373,7 @@
               <div class="health-item"><span>下载线程</span><b>${health.workers || 0} 路</b></div>
               <div class="health-item"><span>磁盘剩余</span><b>${fmtBytes(health.disk_free || 0)}</b></div>
               <div class="health-item"><span>媒体库占用</span><b>${fmtBytes((state.stats && state.stats.storage_bytes) || 0)}</b></div>
-              <div class="health-item"><span>服务版本</span><b>${h(health.version || '1.9.0')}</b></div>
+              <div class="health-item"><span>服务版本</span><b>${h(health.version || '1.9.1')}</b></div>
             </div>
             <div style="display:flex;gap:6px;margin-top:10px">
               <button class="btn sm" data-action="site-check" data-source="huangguo">测试黄果</button>
@@ -1999,6 +2034,46 @@
         } catch (err) { toast(err.message, 'err'); }
         break;
       }
+      case 'dup-check': {
+        if (el.checked) state.dupSelected.add(id);
+        else state.dupSelected.delete(id);
+        syncDupSelection();
+        break;
+      }
+      case 'dup-select-all':
+        state.dupSelected = new Set(allDuplicateItems().map((item) => item.id));
+        syncDupSelection();
+        break;
+      case 'dup-select-hidden':
+        state.dupSelected = new Set(allDuplicateItems().filter((item) => item.is_duplicate).map((item) => item.id));
+        syncDupSelection();
+        break;
+      case 'dup-select-clear':
+        state.dupSelected.clear();
+        syncDupSelection();
+        break;
+      case 'dup-batch-keep':
+      case 'dup-batch-unkeep':
+      case 'dup-batch-subscribe':
+      case 'dup-batch-download': {
+        const action = el.dataset.action.replace('dup-batch-', '');
+        const ids = [...state.dupSelected];
+        if (!ids.length) { toast('先勾选版本', 'err'); break; }
+        if (action === 'download' && !confirm(`下载选中的 ${ids.length} 个版本？已下载分集会跳过。`)) break;
+        try {
+          const res = await api('/duplicates/batch', {
+            method: 'POST',
+            body: { ids, action, quality: state.quality, auto_download: true },
+          });
+          state.duplicates = res.groups || [];
+          state.dupSelected.clear();
+          toast(res.message || '批量操作完成', 'ok');
+          await loadStats();
+          refreshActivity();
+          renderDuplicatesView();
+        } catch (err) { toast(err.message, 'err'); }
+        break;
+      }
       case 'dup-keep': {
         const keep = el.dataset.keep !== '0';
         try {
@@ -2555,4 +2630,5 @@
 
   boot();
 })();
+
 
