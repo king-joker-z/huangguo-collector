@@ -4,6 +4,7 @@ from pathlib import Path
 
 from app.db import Database
 from app.downloader import DownloadManager
+from app.nfo import media_title
 from app.settings import Settings
 
 
@@ -224,6 +225,35 @@ class DatabaseStatsTests(unittest.TestCase):
         group = next(g for g in groups if g["title"] == "手动主版本测试")
         self.assertEqual(group["preferred"]["id"], second)
         self.assertFalse(group["manual"])
+
+    def test_keep_separate_versions(self):
+        ids = []
+        for site_id, total in (("10050", 3), ("10051", 6)):
+            card = {
+                "site_id": site_id, "module": "duanju", "title": "独立保留测试",
+                "url": f"https://example/video/{site_id}/", "cover_url": "",
+                "score": 0, "total_ep": total, "views": "", "tags": [], "badges": [],
+            }
+            drama_id, _, _ = self.db.upsert_card(card)
+            ids.append(drama_id)
+        rows = [self.db.get_drama(i) for i in ids]
+        hidden = next(r for r in rows if r["is_duplicate"])
+        visible = next(r for r in rows if not r["is_duplicate"])
+        self.assertEqual(self.db.list_dramas()["total"], 1)
+
+        self.db.set_duplicate_keep(int(hidden["id"]), True)
+        self.assertFalse(self.db.get_drama(int(hidden["id"]))["is_duplicate"])
+        self.assertTrue(self.db.get_drama(int(hidden["id"]))["keep_separate"])
+        self.assertEqual(self.db.list_dramas()["total"], 2)
+        self.assertEqual(
+            media_title({"title": "独立保留测试", "keep_separate": True, "site_id": "huangguo_10051"}),
+            "独立保留测试 [huangguo_10051]",
+        )
+
+        self.db.set_duplicate_keep(int(hidden["id"]), False)
+        self.assertTrue(self.db.get_drama(int(hidden["id"]))["is_duplicate"])
+        self.assertEqual(self.db.list_dramas()["total"], 1)
+        self.assertFalse(self.db.get_drama(int(visible["id"]))["is_duplicate"])
 
     def test_scan_run_history(self):
         run_id = self.db.create_scan_run(["original"], False, 1, False)

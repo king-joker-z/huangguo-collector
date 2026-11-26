@@ -43,9 +43,17 @@ def drama_year(drama: dict) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def media_title(drama: dict) -> str:
+    title = safe_name(drama.get("title") or "未命名")
+    if drama.get("keep_separate"):
+        suffix = safe_name(str(drama.get("site_id") or drama.get("source") or "独立版本"))
+        title = f"{title} [{suffix}]"
+    return title
+
+
 def show_folder(settings: Settings, drama: dict) -> Path:
     module_label = MODULES.get(drama.get("module", ""), {}).get("label", drama.get("module", ""))
-    title = safe_name(drama.get("title") or "未命名")
+    title = media_title(drama)
     year = drama_year(drama)
     template = settings.get("folder_template") or "{module}/{title} ({year})"
     try:
@@ -67,7 +75,7 @@ def season_folder(settings: Settings, drama: dict) -> Path:
 
 
 def episode_basename(drama: dict, ep: int, width: int = 2) -> str:
-    title = safe_name(drama.get("title") or "未命名")
+    title = media_title(drama)
     return f"{title} - S01E{int(ep):0{width}d}"
 
 
@@ -183,9 +191,9 @@ def write_show_nfo(settings: Settings, drama: dict, episodes: list[dict]) -> Pat
     lines = [
         '<?xml version="1.0" encoding="utf-8" standalone="yes"?>',
         "<tvshow>",
-        f"  <title>{escape(str(drama.get('title') or ''))}</title>",
+        f"  <title>{escape(media_title(drama))}</title>",
         f"  <originaltitle>{escape(str(drama.get('title') or ''))}</originaltitle>",
-        f"  <sorttitle>{escape(str(drama.get('title') or ''))}</sorttitle>",
+        f"  <sorttitle>{escape(media_title(drama))}</sorttitle>",
         f"  <plot>{plot}</plot>",
         f"  <outline>{escape(str(drama.get('description') or '')[:220])}</outline>",
         f"  <tagline>{escape(MODULES.get(drama.get('module',''), {}).get('label','') + ' · 黄果短剧')}</tagline>",
@@ -227,7 +235,7 @@ def write_episode_nfo(settings: Settings, drama: dict, ep: dict) -> Path | None:
         '<?xml version="1.0" encoding="utf-8" standalone="yes"?>',
         "<episodedetails>",
         f"  <title>{escape(str(ep.get('title') or f'第{number}集'))}</title>",
-        f"  <showtitle>{escape(str(drama.get('title') or ''))}</showtitle>",
+        f"  <showtitle>{escape(media_title(drama))}</showtitle>",
         f"  <plot>{plot}</plot>",
     ]
     if episode_thumb_path(settings, drama, number).exists():

@@ -11,7 +11,7 @@
 - 更新检测：重新扫描后标记「有更新」，直接补下新增分集
 - 双站点：黄果（原创/短剧/漫剧）+ 野果（探索分类）
 - 跨站点同名合并：同名剧只保留集数最多的一个版本，重复条目隐藏但文件不删除
-- 重复剧管理页：查看/手动指定主版本，合并标签收藏
+- 重复剧管理页：查看/手动指定主版本，合并标签收藏；同名不同内容可独立保留并分别订阅下载
 - 全选当前筛选结果，批量订阅/下载/打标签
 - 扫描历史与中断继续，Provider 多站点架构
 - 标签排除：把题材/自建标签加入排除列表，相关剧集从媒体库、更新、订阅、统计中隐藏
@@ -35,6 +35,16 @@
 - **详情页**：封面、评分、题材、简介、下载进度、体积估算、分集网格、NFO 操作；桌面 3 栏，窄屏自动折叠。
 
 > 仅用于个人媒体库整理。内容为成人向 AI 短剧（18+），请遵守站点条款与当地法律法规，不要公开传播。
+
+## 1.9.0 同名不同内容多版本
+
+- 重复剧管理页新增「独立保留」：同名但内容不同的版本可以同时展示、订阅、下载。
+- 每个版本卡片直接提供「订阅 / 下载」按钮；隐藏版本点订阅或下载会自动独立保留。
+- 独立保留的版本目录和 NFO 自动带 `[站点ID]` 后缀，避免同名文件互相覆盖。
+- 「取消独立」会回到自动去重；已下载文件保留，不删除。
+- 默认行为不变：仍然自动按集数最多保留一个版本，只有手动独立保留才显示多个。
+- 新增 `POST /api/duplicates/{id}/keep`。
+- 23 个单测全部通过。
 
 ## 1.8.0 全选 / 重复剧 / 扫描历史
 
@@ -338,6 +348,7 @@ huangguo-collector/
 | GET | `/api/drama-ids` | 当前筛选的全部剧集 ID（全选筛选结果） |
 | GET | `/api/duplicates` | 同名重复剧分组 |
 | POST | `/api/duplicates/{id}/prefer` | 设为主版本并合并标签/收藏 |
+| POST | `/api/duplicates/{id}/keep` | 独立保留/取消独立（同名多版本） |
 | POST | `/api/duplicates/{id}/auto` | 恢复自动选择主版本 |
 | GET | `/api/scans` | 扫描历史 |
 | POST | `/api/scans/{id}/resume` | 继续上次扫描 |
@@ -393,12 +404,12 @@ huangguo-collector/
 
 镜像已发布到 Docker Hub（`linux/amd64`，适配 Z4 Pro）：
 
-- **镜像**：`jokermelove/huangguo-collector:1.8.0`（另有 `latest`）
+- **镜像**：`jokermelove/huangguo-collector:1.9.0`（另有 `latest`）
 - **GitHub**：<https://github.com/king-joker-z/huangguo-collector>
 - **Actions**：推送到 `main` 自动构建并推送 Docker Hub，也可在 Actions 页手动 `Run workflow`
 
 ```sh
-docker pull jokermelove/huangguo-collector:1.8.0
+docker pull jokermelove/huangguo-collector:1.9.0
 ```
 
 ### 方式 A：极空间直接拉取镜像（推荐）
@@ -424,7 +435,7 @@ docker compose -f docker-compose.zspace.yml up -d
 本机有 Docker 时：
 
 ```sh
-docker build --platform linux/amd64 -t jokermelove/huangguo-collector:1.8.0 .
+docker build --platform linux/amd64 -t jokermelove/huangguo-collector:1.9.0 .
 # 或
 docker compose up -d --build
 ```
@@ -470,3 +481,4 @@ docker exec huangguo-collector df -h /data /downloads
 ## 13. 免责声明
 
 本项目只做本地采集与媒体库整理，不托管、不分发任何内容。请自行确认内容合法性、年龄限制与站点服务条款；因使用产生的任何后果由使用者承担。
+

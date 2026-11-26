@@ -422,6 +422,18 @@ def prefer_duplicate(drama_id: int, payload: dict | None = Body(None)):
     return ok(groups=db.list_duplicate_groups(), message="已设为主版本")
 
 
+@router.post("/duplicates/{drama_id}/keep")
+def keep_duplicate(drama_id: int, payload: dict | None = Body(None)):
+    payload = payload or {}
+    try:
+        db.set_duplicate_keep(drama_id, keep=bool(payload.get("keep", True)))
+    except KeyError as exc:
+        fail(str(exc), 404)
+    except ValueError as exc:
+        fail(str(exc))
+    return ok(groups=db.list_duplicate_groups(), message="已更新独立保留状态")
+
+
 @router.post("/duplicates/{drama_id}/auto")
 def reset_duplicate(drama_id: int):
     try:

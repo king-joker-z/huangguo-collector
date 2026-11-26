@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS dramas (
     duplicate_of INTEGER DEFAULT 0,
     is_duplicate INTEGER DEFAULT 0,
     manual_preferred INTEGER DEFAULT 0,
+    keep_separate INTEGER DEFAULT 0,
     title TEXT NOT NULL,
     url TEXT NOT NULL,
     cover_url TEXT DEFAULT '',
@@ -239,6 +240,8 @@ class Database:
                 self.conn.execute("ALTER TABLE dramas ADD COLUMN is_duplicate INTEGER DEFAULT 0")
             if "manual_preferred" not in columns:
                 self.conn.execute("ALTER TABLE dramas ADD COLUMN manual_preferred INTEGER DEFAULT 0")
+            if "keep_separate" not in columns:
+                self.conn.execute("ALTER TABLE dramas ADD COLUMN keep_separate INTEGER DEFAULT 0")
             episode_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(episodes)")}
             if "cover_url" not in episode_columns:
                 self.conn.execute("ALTER TABLE episodes ADD COLUMN cover_url TEXT DEFAULT ''")
@@ -473,16 +476,32 @@ class Database:
         if not key:
             return
         rows = self.query(
-            "SELECT id,source,total_ep,manual_preferred FROM dramas WHERE title_key=? "
-            "ORDER BY manual_preferred DESC, total_ep DESC, id ASC",
+            "SELECT id,source,total_ep,manual_preferred,keep_separate,is_duplicate FROM dramas "
+            "WHERE title_key=? ORDER BY keep_separate DESC, manual_preferred DESC, total_ep DESC, id ASC",
             (key,),
         )
         if not rows:
             return
-        preferred = rows[0]
+        kept = [row for row in rows if int(row["keep_separate"] or 0)]
+        non_kept = [row for row in rows if not int(row["keep_separate"] or 0)]
+        manual = next((row for row in rows if int(row["manual_preferred"] or 0)), None)
+        # 手动保留的版本可以同时显示；如果保留的是当前主版本，不要再把其他版本
+        # 提升为可见；如果保留的是隐藏版本，则原主版本继续显示。
+        if manual:
+            preferred = manual
+        elif any(int(row["is_duplicate"] or 0) == 0 for row in kept):
+            preferred = next(row for row in kept if int(row["is_duplicate"] or 0) == 0)
+        elif non_kept:
+            preferred = non_kept[0]
+        elif kept:
+            preferred = kept[0]
+        else:
+            preferred = rows[0]
+        visible_ids = {int(row["id"]) for row in kept}
+        visible_ids.add(int(preferred["id"]))
         for row in rows:
-            is_dup = 1 if int(row["id"]) != int(preferred["id"]) else 0
-            dup_of = int(preferred["id"]) if is_dup else 0
+            is_dup = 0 if int(row["id"]) in visible_ids else 1
+            dup_of = 0 if is_dup == 0 else int(preferred["id"])
             self.execute(
                 "UPDATE dramas SET duplicate_of=?,is_duplicate=? "
                 "WHERE id=? AND (duplicate_of<>? OR is_duplicate<>?)",
@@ -564,6 +583,20 @@ class Database:
                     f"(SELECT 1 FROM dramas WHERE id IN ({placeholders}) AND favorite=1)",
                     (drama_id, *other_ids),
                 )
+        self.resolve_title_group(key)
+        return key
+
+    def set_duplicate_keep(self, drama_id: int, keep: bool = True) -> str:
+        row = self.get_drama(drama_id)
+        if not row:
+            raise KeyError("剧集不存在")
+        key = str(row["title_key"] or "")
+        if not key:
+            raise ValueError("该剧没有同名分组")
+        self.execute(
+            "UPDATE dramas SET keep_separate=? WHERE id=?",
+            (1 if keep else 0, int(drama_id)),
+        )
         self.resolve_title_group(key)
         return key
 
@@ -1162,6 +1195,7 @@ class Database:
         d["is_duplicate"] = bool(d.get("is_duplicate"))
         d["duplicate_of"] = int(d.get("duplicate_of") or 0)
         d["manual_preferred"] = bool(d.get("manual_preferred"))
+        d["keep_separate"] = bool(d.get("keep_separate"))
         d["subscribed"] = bool(d.pop("subscribed_flag", 0))
         d["sub_quality"] = d.pop("sub_quality", "") or ""
         d["sub_auto"] = bool(d.pop("sub_auto", 1))

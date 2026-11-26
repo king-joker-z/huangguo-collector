@@ -263,7 +263,7 @@
     if (state.health) {
       const ok = state.health.ffmpeg;
       $('#health-dot').style.background = ok ? 'var(--ok)' : 'var(--accent)';
-      $('#health-text').textContent = ok ? `v1.8.0 · ${state.health.workers || 0} 路下载` : 'ffmpeg 未就绪';
+      $('#health-text').textContent = ok ? `v1.9.0 · ${state.health.workers || 0} 路下载` : 'ffmpeg 未就绪';
     }
   }
 
@@ -1191,23 +1191,27 @@
       if (token !== renderToken) return;
       state.duplicates = res.groups || [];
       $('#view').innerHTML = `
-        <div class="page-head"><h1>重复剧</h1><p>同名剧只展示一个版本；可手动指定主版本</p></div>
+        <div class="page-head"><h1>重复剧</h1><p>同名剧默认只展示一个版本；内容不同的可「独立保留」，目录名会自动带站点 ID 防止覆盖</p></div>
         ${state.duplicates.length ? state.duplicates.map((group) => `
           <div class="dup-group">
             <div class="dup-head"><b>${h(group.title)}</b><span>${group.items.length} 个版本</span>${group.manual ? '<span class="pill warn">手动指定</span>' : ''}</div>
             <div class="dup-grid">
-              ${group.items.map((item) => `<div class="dup-card ${item.is_duplicate ? 'hidden-version' : 'preferred'}">
+              ${group.items.map((item) => `<div class="dup-card ${item.is_duplicate ? 'hidden-version' : 'preferred'} ${item.keep_separate ? 'kept-version' : ''}">
                 <img src="${h(item.cover || '')}" alt="" onerror="this.style.visibility='hidden'">
                 <div class="dup-main">
                   <div class="dup-title">${h(item.title)}</div>
-                  <div class="dup-sub">${h(item.source_label || '')} · ${h(item.module_label || '')} · ${item.done_ep || 0}/${item.total_ep || 0} 集</div>
+                  <div class="dup-sub">${h(item.source_label || '')} · ${h(item.module_label || '')} · #${h(item.raw_site_id || '')} · ${item.done_ep || 0}/${item.total_ep || 0} 集</div>
                   <div class="dup-tags">
                     <span class="tag">${item.is_duplicate ? '已隐藏' : '当前展示'}</span>
+                    ${item.keep_separate ? '<span class="tag">独立保留</span>' : ''}
                     ${item.manual_preferred ? '<span class="tag">手动主版本</span>' : ''}
                   </div>
                 </div>
                 <div class="dup-actions">
                   ${item.is_duplicate ? `<button class="btn sm pri" data-action="dup-prefer" data-id="${item.id}">设为主版本</button>` : ''}
+                  ${item.keep_separate ? `<button class="btn sm ghost" data-action="dup-keep" data-id="${item.id}" data-keep="0">取消独立</button>` : `<button class="btn sm" data-action="dup-keep" data-id="${item.id}" data-keep="1">独立保留</button>`}
+                  <button class="btn sm" data-action="dup-subscribe" data-id="${item.id}">${item.subscribed ? '已订阅' : '订阅'}</button>
+                  <button class="btn sm pri" data-action="dup-download" data-id="${item.id}">下载</button>
                   ${!item.is_duplicate && group.manual ? `<button class="btn sm ghost" data-action="dup-auto" data-id="${item.id}">恢复自动</button>` : ''}
                 </div>
               </div>`).join('')}
@@ -1334,7 +1338,7 @@
               <div class="health-item"><span>下载线程</span><b>${health.workers || 0} 路</b></div>
               <div class="health-item"><span>磁盘剩余</span><b>${fmtBytes(health.disk_free || 0)}</b></div>
               <div class="health-item"><span>媒体库占用</span><b>${fmtBytes((state.stats && state.stats.storage_bytes) || 0)}</b></div>
-              <div class="health-item"><span>服务版本</span><b>${h(health.version || '1.8.0')}</b></div>
+              <div class="health-item"><span>服务版本</span><b>${h(health.version || '1.9.0')}</b></div>
             </div>
             <div style="display:flex;gap:6px;margin-top:10px">
               <button class="btn sm" data-action="site-check" data-source="huangguo">测试黄果</button>
@@ -1995,6 +1999,51 @@
         } catch (err) { toast(err.message, 'err'); }
         break;
       }
+      case 'dup-keep': {
+        const keep = el.dataset.keep !== '0';
+        try {
+          const res = await api(`/duplicates/${id}/keep`, { method: 'POST', body: { keep } });
+          state.duplicates = res.groups || [];
+          toast(keep ? '已独立保留，会作为独立剧集出现' : '已取消独立', 'ok');
+          await loadStats();
+          renderDuplicatesView();
+        } catch (err) { toast(err.message, 'err'); }
+        break;
+      }
+      case 'dup-subscribe': {
+        try {
+          const item = (state.duplicates || []).flatMap((g) => g.items).find((x) => Number(x.id) === id);
+          if (item && item.is_duplicate) {
+            await api(`/duplicates/${id}/keep`, { method: 'POST', body: { keep: true } });
+          }
+          const res = await api(`/dramas/${id}/subscribe`, {
+            method: 'POST',
+            body: { quality: state.quality, auto_download: true, download_now: false },
+          });
+          toast(res.message || '已订阅', 'ok');
+          await loadStats();
+          renderDuplicatesView();
+        } catch (err) { toast(err.message, 'err'); }
+        break;
+      }
+      case 'dup-download': {
+        if (!confirm('下载这个版本？已下载的分集会跳过。')) break;
+        try {
+          const item = (state.duplicates || []).flatMap((g) => g.items).find((x) => Number(x.id) === id);
+          if (item && item.is_duplicate) {
+            await api(`/duplicates/${id}/keep`, { method: 'POST', body: { keep: true } });
+          }
+          const res = await api(`/dramas/${id}/download`, {
+            method: 'POST',
+            body: { scope: 'all', quality: state.quality },
+          });
+          toast(res.message || '已加入下载队列', 'ok');
+          refreshActivity();
+          await loadStats();
+          renderDuplicatesView();
+        } catch (err) { toast(err.message, 'err'); }
+        break;
+      }
       case 'dup-prefer': {
         if (!confirm('设为主版本？会合并重复版本的标签和收藏，已下载文件不会删除。')) break;
         try {
@@ -2506,3 +2555,4 @@
 
   boot();
 })();
+
