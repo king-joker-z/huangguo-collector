@@ -633,6 +633,39 @@ body.modal-open { overflow: hidden; }
 .excluded-chip button { border: 0; background: transparent; color: #ff8da0; font-size: 10.5px; padding: 0; }
 .excluded-chip button:hover { color: #fff; text-decoration: underline; }
 
+/* ----------------------------------------------------------- duplicates */
+.dup-group { border: 1px solid var(--line); border-radius: 12px; background: var(--panel); padding: 12px; margin-bottom: 10px; }
+.dup-head { display: flex; align-items: center; gap: 8px; margin-bottom: 9px; }
+.dup-head b { font-size: 13.5px; }
+.dup-head span { color: var(--dim); font-size: 10.5px; }
+.dup-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 8px; }
+.dup-card { display: flex; align-items: center; gap: 9px; padding: 8px; border-radius: 9px; border: 1px solid var(--line); background: var(--bg2); }
+.dup-card.hidden-version { opacity: .62; border-style: dashed; }
+.dup-card.preferred { border-color: rgba(61, 220, 151, .25); }
+.dup-card img { width: 38px; height: 50px; object-fit: cover; border-radius: 5px; background: #10131a; }
+.dup-main { flex: 1; min-width: 0; }
+.dup-title { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dup-sub { color: var(--dim); font-size: 10px; margin-top: 2px; }
+.dup-tags { display: flex; gap: 4px; margin-top: 4px; }
+.dup-tags .tag { font-size: 9px; color: var(--muted); border: 1px solid var(--line2); border-radius: 4px; padding: 0 4px; }
+.dup-actions { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
+
+/* ----------------------------------------------------------- scan history */
+.scan-run { display: flex; gap: 12px; align-items: center; padding: 12px 14px; margin-bottom: 8px; border: 1px solid var(--line); border-radius: 11px; background: var(--panel); }
+.scan-run.canceled, .scan-run.interrupted { opacity: .75; }
+.scan-run.error { border-color: rgba(255, 92, 122, .25); }
+.scan-run-main { flex: 1; min-width: 0; }
+.scan-run-title { display: flex; gap: 8px; align-items: center; font-size: 12.5px; }
+.scan-run-title b { color: var(--muted); font-size: 11px; }
+.scan-run-title .state { color: var(--ok); font-size: 10.5px; }
+.scan-run.canceled .state, .scan-run.interrupted .state { color: var(--warn); }
+.scan-run.error .state { color: var(--accent); }
+.scan-run-sub { color: var(--dim); font-size: 10px; margin-top: 2px; }
+.scan-run-stats { display: flex; gap: 12px; color: var(--muted); font-size: 10.5px; margin-top: 4px; }
+.scan-run-stats b { color: #dfe4ee; }
+.scan-run-msg { color: var(--dim); font-size: 10.5px; margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.scan-run-actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+
 /* ----------------------------------------------------------- subscriptions */
 .sub-row {
   display: grid; grid-template-columns: 54px minmax(0, 1fr) 240px;

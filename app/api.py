@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse, Response
 from . import nfo
 from .config import MODULES, VERSION
 from .db import now_str
+from .providers import provider_summary
 from .runtime import covers, db, downloads, hls, scan, scheduler, scraper, scrapers, settings
 from .scheduler import format_datetime, next_run_at
 from .scraper import ScrapeError
@@ -149,6 +150,11 @@ def modules():
     return ok(modules=[{"key": k, "label": v["label"], "desc": v["desc"]} for k, v in MODULES.items()])
 
 
+@router.get("/providers")
+def providers():
+    return ok(providers=provider_summary(scrapers))
+
+
 # --------------------------------------------------------------------- dramas
 @router.get("/dramas")
 def list_dramas(
@@ -169,6 +175,25 @@ def list_dramas(
         module, q, status, tag, sort, page, per_page, score_min, year, site_tag,
         source, include_duplicates,
     ))
+
+
+@router.get("/drama-ids")
+def list_drama_ids(
+    module: str = "all",
+    q: str = "",
+    status: str = "all",
+    tag: str = "",
+    sort: str = "updated",
+    score_min: float = 0,
+    year: int = 0,
+    site_tag: str = "",
+    source: str = "",
+    include_duplicates: bool = False,
+):
+    ids = db.list_drama_ids(
+        module, q, status, tag, sort, score_min, year, site_tag, source, include_duplicates
+    )
+    return ok(ids=ids, total=len(ids))
 
 
 @router.get("/dramas/{drama_id}")
@@ -376,6 +401,36 @@ def batch(payload: dict = Body(...)):
         return ok(message="已处理更新标记")
 
     fail("未知的批量操作")
+
+
+# -------------------------------------------------------------------- duplicates
+@router.get("/duplicates")
+def duplicates():
+    groups = db.list_duplicate_groups()
+    return ok(groups=groups, total=len(groups))
+
+
+@router.post("/duplicates/{drama_id}/prefer")
+def prefer_duplicate(drama_id: int, payload: dict | None = Body(None)):
+    payload = payload or {}
+    try:
+        db.prefer_duplicate(drama_id, merge_metadata=bool(payload.get("merge_metadata", True)))
+    except KeyError as exc:
+        fail(str(exc), 404)
+    except ValueError as exc:
+        fail(str(exc))
+    return ok(groups=db.list_duplicate_groups(), message="已设为主版本")
+
+
+@router.post("/duplicates/{drama_id}/auto")
+def reset_duplicate(drama_id: int):
+    try:
+        db.reset_duplicate_preference(drama_id)
+    except KeyError as exc:
+        fail(str(exc), 404)
+    except ValueError as exc:
+        fail(str(exc))
+    return ok(groups=db.list_duplicate_groups(), message="已恢复自动选择")
 
 
 # -------------------------------------------------------------------- updates
@@ -645,6 +700,19 @@ def history():
 
 
 # ----------------------------------------------------------------------- scan
+@router.get("/scans")
+def scan_history(limit: int = 60):
+    return ok(items=db.list_scan_runs(limit))
+
+
+@router.post("/scans/{run_id}/resume")
+def resume_scan(run_id: int):
+    started, message = scan.resume(run_id)
+    if not started:
+        fail(message, 409)
+    return ok(message=message, scan=scan.status())
+
+
 @router.get("/scan")
 def scan_status():
     return ok(scan=scan.status())

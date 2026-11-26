@@ -1,4 +1,4 @@
-﻿<!doctype html>
+<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="dark">
   <title>黄果媒体库 · Huangguo Library</title>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/static/style.css?v=1.7.1">
+  <link rel="stylesheet" href="/static/style.css?v=1.8.0">
 </head>
 <body>
   <header class="topbar">
@@ -47,7 +47,9 @@
       <nav class="side-nav">
         <a class="snav" data-nav="updates" href="#/updates"><span class="ic">↻</span><span>更新提醒</span><i id="nav-updates">0</i></a>
         <a class="snav" data-nav="downloads" href="#/downloads"><span class="ic">↓</span><span>下载队列</span><i id="nav-tasks">0</i></a>
+        <a class="snav" data-nav="scans" href="#/scans"><span class="ic">▤</span><span>扫描历史</span></a>
         <a class="snav" data-nav="subscriptions" href="#/subscriptions"><span class="ic">◉</span><span>订阅追更</span><i id="nav-subs">0</i></a>
+        <a class="snav" data-nav="duplicates" href="#/duplicates"><span class="ic">⧉</span><span>重复剧</span><i id="nav-dups">0</i></a>
         <a class="snav" data-nav="schedules" href="#/schedules"><span class="ic">⏱</span><span>定时任务</span></a>
         <a class="snav" data-nav="tags" href="#/tags"><span class="ic">#</span><span>标签管理</span></a>
         <a class="snav" data-nav="settings" href="#/settings"><span class="ic">⚙</span><span>设置</span></a>
@@ -69,7 +71,7 @@
           <div class="storage-bar"><span id="storage-fill"></span></div>
           <div class="storage-bottom"><span id="storage-free">磁盘剩余 --</span><span id="storage-eps">0 集</span></div>
         </div>
-        <div class="side-version"><span class="dot online" id="health-dot"></span><span id="health-text">v1.7.1 · 本地服务</span></div>
+        <div class="side-version"><span class="dot online" id="health-dot"></span><span id="health-text">v1.8.0 · 本地服务</span></div>
       </div>
     </aside>
 
@@ -103,18 +105,6 @@
   <div id="modal-root"></div>
 
   <script src="/static/hls.min.js"></script>
-  <script src="/static/app.js?v=1.7.1"></script>
+  <script src="/static/app.js?v=1.8.0"></script>
 </body>
 </html>
-
-
-
-
-
-
-
-
-
-
-
-

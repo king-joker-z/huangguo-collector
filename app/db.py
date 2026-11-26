@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS dramas (
     title_key TEXT DEFAULT '',
     duplicate_of INTEGER DEFAULT 0,
     is_duplicate INTEGER DEFAULT 0,
+    manual_preferred INTEGER DEFAULT 0,
     title TEXT NOT NULL,
     url TEXT NOT NULL,
     cover_url TEXT DEFAULT '',
@@ -158,6 +159,8 @@ CREATE TABLE IF NOT EXISTS scan_runs (
     new_count INTEGER DEFAULT 0,
     updated_count INTEGER DEFAULT 0,
     message TEXT DEFAULT '',
+    options_json TEXT DEFAULT '{}',
+    resumed_from INTEGER DEFAULT 0,
     started_at TEXT,
     finished_at TEXT
 );
@@ -234,11 +237,18 @@ class Database:
                 self.conn.execute("ALTER TABLE dramas ADD COLUMN duplicate_of INTEGER DEFAULT 0")
             if "is_duplicate" not in columns:
                 self.conn.execute("ALTER TABLE dramas ADD COLUMN is_duplicate INTEGER DEFAULT 0")
+            if "manual_preferred" not in columns:
+                self.conn.execute("ALTER TABLE dramas ADD COLUMN manual_preferred INTEGER DEFAULT 0")
             episode_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(episodes)")}
             if "cover_url" not in episode_columns:
                 self.conn.execute("ALTER TABLE episodes ADD COLUMN cover_url TEXT DEFAULT ''")
             if "cover_path" not in episode_columns:
                 self.conn.execute("ALTER TABLE episodes ADD COLUMN cover_path TEXT DEFAULT ''")
+            scan_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(scan_runs)")}
+            if "options_json" not in scan_columns:
+                self.conn.execute("ALTER TABLE scan_runs ADD COLUMN options_json TEXT DEFAULT '{}'")
+            if "resumed_from" not in scan_columns:
+                self.conn.execute("ALTER TABLE scan_runs ADD COLUMN resumed_from INTEGER DEFAULT 0")
             self.conn.execute(
                 "UPDATE dramas SET modules_json=json_array(module) "
                 "WHERE modules_json IS NULL OR modules_json='' OR modules_json='[]'"
@@ -463,8 +473,8 @@ class Database:
         if not key:
             return
         rows = self.query(
-            "SELECT id,source,total_ep FROM dramas WHERE title_key=? "
-            "ORDER BY total_ep DESC, id ASC",
+            "SELECT id,source,total_ep,manual_preferred FROM dramas WHERE title_key=? "
+            "ORDER BY manual_preferred DESC, total_ep DESC, id ASC",
             (key,),
         )
         if not rows:
@@ -486,6 +496,87 @@ class Database:
         )
         for row in rows:
             self.resolve_title_group(str(row["title_key"]))
+
+    def list_duplicate_groups(self) -> list[dict]:
+        rows = self.query(
+            """SELECT d.*,
+                 (SELECT COUNT(*) FROM episodes e WHERE e.drama_id=d.id AND e.state='done') AS done_ep,
+                 (SELECT COUNT(*) FROM episodes e WHERE e.drama_id=d.id) AS ep_rows,
+                 (SELECT COUNT(*) FROM subscriptions s WHERE s.drama_id=d.id AND s.enabled=1) AS subscribed_flag,
+                 (SELECT s.quality FROM subscriptions s WHERE s.drama_id=d.id LIMIT 1) AS sub_quality,
+                 (SELECT s.auto_download FROM subscriptions s WHERE s.drama_id=d.id LIMIT 1) AS sub_auto
+               FROM dramas d
+               WHERE d.title_key<>'' AND d.title_key IN (
+                 SELECT title_key FROM dramas WHERE title_key<>''
+                 GROUP BY title_key HAVING COUNT(*)>1
+               )
+               ORDER BY d.title_key, d.is_duplicate, d.manual_preferred DESC, d.total_ep DESC, d.id"""
+        )
+        groups: dict[str, dict] = {}
+        for row in rows:
+            item = self._drama_dict(row)
+            item["manual_preferred"] = bool(row["manual_preferred"])
+            key = str(row["title_key"])
+            group = groups.setdefault(key, {"key": key, "title": item["title"], "items": []})
+            group["items"].append(item)
+        out = []
+        for group in groups.values():
+            visible = [i for i in group["items"] if not i["is_duplicate"]]
+            hidden = [i for i in group["items"] if i["is_duplicate"]]
+            preferred = visible[0] if visible else (group["items"][0] if group["items"] else None)
+            if not preferred:
+                continue
+            group["preferred"] = preferred
+            group["duplicates"] = hidden
+            group["manual"] = bool(preferred.get("manual_preferred"))
+            out.append(group)
+        out.sort(key=lambda g: (not g["manual"], -len(g["items"]), g["title"]))
+        return out
+
+    def prefer_duplicate(self, drama_id: int, merge_metadata: bool = True) -> str:
+        row = self.get_drama(drama_id)
+        if not row:
+            raise KeyError("剧集不存在")
+        key = str(row["title_key"] or "")
+        if not key:
+            raise ValueError("该剧没有可合并的同名分组")
+        group = [dict(r) for r in self.query(
+            "SELECT id,title FROM dramas WHERE title_key=?", (key,)
+        )]
+        if len(group) < 2:
+            raise ValueError("该剧没有其他同名版本")
+        self.execute(
+            "UPDATE dramas SET manual_preferred=CASE WHEN id=? THEN 1 ELSE 0 END "
+            "WHERE title_key=?",
+            (drama_id, key),
+        )
+        if merge_metadata:
+            other_ids = [int(r["id"]) for r in group if int(r["id"]) != int(drama_id)]
+            if other_ids:
+                placeholders = ",".join("?" for _ in other_ids)
+                self.execute(
+                    f"""INSERT OR IGNORE INTO drama_tags(drama_id,tag_id)
+                        SELECT ?, tag_id FROM drama_tags WHERE drama_id IN ({placeholders})""",
+                    (drama_id, *other_ids),
+                )
+                self.execute(
+                    f"UPDATE dramas SET favorite=1 WHERE id=? AND EXISTS "
+                    f"(SELECT 1 FROM dramas WHERE id IN ({placeholders}) AND favorite=1)",
+                    (drama_id, *other_ids),
+                )
+        self.resolve_title_group(key)
+        return key
+
+    def reset_duplicate_preference(self, drama_id: int) -> str:
+        row = self.get_drama(drama_id)
+        if not row:
+            raise KeyError("剧集不存在")
+        key = str(row["title_key"] or "")
+        if not key:
+            raise ValueError("该剧没有同名分组")
+        self.execute("UPDATE dramas SET manual_preferred=0 WHERE title_key=?", (key,))
+        self.resolve_title_group(key)
+        return key
 
     def mark_detail_error(self, site_id: str) -> None:
         self.execute("UPDATE dramas SET detail_scraped_at=? WHERE site_id=?", (now_str(), site_id))
@@ -974,6 +1065,35 @@ class Database:
             item["tags"] = tag_map.get(item["id"], [])
         return {"items": items, "total": total, "page": page, "pages": pages, "per_page": per_page}
 
+    def list_drama_ids(
+        self,
+        module: str = "all",
+        q: str = "",
+        status: str = "all",
+        tag: str = "",
+        sort: str = "updated",
+        score_min: float = 0,
+        year: int = 0,
+        site_tag: str = "",
+        source: str = "",
+        include_duplicates: bool = False,
+    ) -> list[int]:
+        """返回当前筛选条件下的全部剧集 ID，供“全选筛选结果”使用。"""
+        ids: list[int] = []
+        page = 1
+        while True:
+            data = self.list_dramas(
+                module=module, q=q, status=status, tag=tag, sort=sort,
+                page=page, per_page=200, score_min=score_min, year=year,
+                site_tag=site_tag, source=source,
+                include_duplicates=include_duplicates,
+            )
+            ids.extend(int(item["id"]) for item in data.get("items", []))
+            if page >= int(data.get("pages") or 1):
+                break
+            page += 1
+        return ids
+
     def get_drama_detail(self, drama_id: int) -> dict | None:
         row = self.query_one(
             """SELECT d.*,
@@ -1041,6 +1161,7 @@ class Database:
         d["raw_site_id"] = raw_site_id
         d["is_duplicate"] = bool(d.get("is_duplicate"))
         d["duplicate_of"] = int(d.get("duplicate_of") or 0)
+        d["manual_preferred"] = bool(d.get("manual_preferred"))
         d["subscribed"] = bool(d.pop("subscribed_flag", 0))
         d["sub_quality"] = d.pop("sub_quality", "") or ""
         d["sub_auto"] = bool(d.pop("sub_auto", 1))
@@ -1186,6 +1307,54 @@ class Database:
         with self._stats_lock:
             self._stats_cache = (now_mono, copy.deepcopy(result))
         return result
+
+    def create_scan_run(self, modules: list[str], details: bool, max_pages: int | None,
+                        refresh: bool, resumed_from: int = 0) -> int:
+        options = {
+            "modules": modules,
+            "details": bool(details),
+            "max_pages": max_pages,
+            "refresh": bool(refresh),
+        }
+        cur = self.execute(
+            """INSERT INTO scan_runs(module,state,message,options_json,resumed_from,started_at)
+               VALUES(?,?,?,?,?,?)""",
+            (",".join(modules), "running", "准备开始", json_dumps(options), int(resumed_from), now_str()),
+        )
+        return int(cur.lastrowid)
+
+    def finish_scan_run(self, run_id: int, state: str, found: int, new_count: int,
+                        updated_count: int, message: str) -> None:
+        self.execute(
+            """UPDATE scan_runs SET state=?,found=?,new_count=?,updated_count=?,message=?,finished_at=?
+               WHERE id=?""",
+            (state, int(found), int(new_count), int(updated_count), message, now_str(), int(run_id)),
+        )
+
+    def mark_interrupted_scan_runs(self) -> None:
+        self.execute(
+            "UPDATE scan_runs SET state='interrupted',message='程序重启前扫描未完成',finished_at=? "
+            "WHERE state='running'",
+            (now_str(),),
+        )
+
+    def list_scan_runs(self, limit: int = 50) -> list[dict]:
+        rows = self.query("SELECT * FROM scan_runs ORDER BY id DESC LIMIT ?", (int(limit),))
+        out = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["options"] = json.loads(item.pop("options_json", "{}") or "{}")
+            except Exception:
+                item["options"] = {}
+            out.append(item)
+        return out
+
+    def get_scan_run(self, run_id: int) -> dict | None:
+        for item in self.list_scan_runs(500):
+            if int(item["id"]) == int(run_id):
+                return item
+        return None
 
     def recent_activity(self, limit: int = 20) -> list[dict]:
         rows = self.query(

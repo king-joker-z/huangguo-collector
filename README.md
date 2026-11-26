@@ -11,6 +11,9 @@
 - 更新检测：重新扫描后标记「有更新」，直接补下新增分集
 - 双站点：黄果（原创/短剧/漫剧）+ 野果（探索分类）
 - 跨站点同名合并：同名剧只保留集数最多的一个版本，重复条目隐藏但文件不删除
+- 重复剧管理页：查看/手动指定主版本，合并标签收藏
+- 全选当前筛选结果，批量订阅/下载/打标签
+- 扫描历史与中断继续，Provider 多站点架构
 - 标签排除：把题材/自建标签加入排除列表，相关剧集从媒体库、更新、订阅、统计中隐藏
 - 下载队列暂停/继续，当前集完成后不再开始新任务
 - 定时任务：每天/每周指定时间自动全量扫库（最新 + 热播 + 精选 / 野果探索）
@@ -32,6 +35,18 @@
 - **详情页**：封面、评分、题材、简介、下载进度、体积估算、分集网格、NFO 操作；桌面 3 栏，窄屏自动折叠。
 
 > 仅用于个人媒体库整理。内容为成人向 AI 短剧（18+），请遵守站点条款与当地法律法规，不要公开传播。
+
+## 1.8.0 全选 / 重复剧 / 扫描历史
+
+- 媒体库工具栏新增「全选筛选结果」：按当前搜索/模块/状态/标签/题材/评分/年份/排序，一次选中全部结果，批量订阅、下载、打标签直接作用于全部。
+- 新增「重复剧」页：查看所有同名分组、来源、集数、下载情况。
+- 重复剧可「设为主版本」：会合并重复版本的标签和收藏；已下载文件不删除。
+- 支持「恢复自动」：回到按集数最多自动选择，手动指定会被持久化。
+- 新增「扫描历史」：记录每次扫描的模块、发现/新增/更新、状态和错误。
+- 扫描停止/异常/重启中断后，可在历史里「继续扫描」；已同步详情会自动跳过。
+- 新增 `SiteProvider` 注册表，黄果/野果采集器统一由 `app/providers.py` 构建，后续加站点只改注册表与 MODULES。
+- 新增 `/api/providers` 查看站点 Provider 状态。
+- 22 个单测全部通过。
 
 ## 1.7.1 视频头/宽高兜底
 
@@ -288,6 +303,7 @@ huangguo-collector/
     db.py           SQLite 表结构与数据访问
     scraper.py      黄果列表/详情/播放接口/封面解密
     yeguo.py        野果列表/播放 AES 解密/封面
+    providers.py    站点 Provider 注册表
     scan.py         全量与增量扫描调度
     scheduler.py    定时任务调度器
     covers.py       已下载分集的封面抽帧补全
@@ -319,6 +335,13 @@ huangguo-collector/
 | GET | `/api/activity` | 扫描进度 + 活动任务 + 统计（前端 1.6s 轮询） |
 | POST | `/api/scan` | 开始扫描 `{modules, pages, details, refresh}`，modules 支持 `yeguo` |
 | GET | `/api/dramas` | 分页/搜索/筛选/排序；支持 `source`、`include_duplicates` |
+| GET | `/api/drama-ids` | 当前筛选的全部剧集 ID（全选筛选结果） |
+| GET | `/api/duplicates` | 同名重复剧分组 |
+| POST | `/api/duplicates/{id}/prefer` | 设为主版本并合并标签/收藏 |
+| POST | `/api/duplicates/{id}/auto` | 恢复自动选择主版本 |
+| GET | `/api/scans` | 扫描历史 |
+| POST | `/api/scans/{id}/resume` | 继续上次扫描 |
+| GET | `/api/providers` | 站点 Provider 状态 |
 | GET | `/api/dramas/{id}` | 详情 + 分集 + 标签 + 空间估算；重复条目返回 `duplicate_preferred` |
 | POST | `/api/dramas/{id}/download` | `{scope: all/new/eps, eps, quality}` |
 | POST | `/api/dramas/batch` | 批量下载/订阅/取消订阅/同步/打标签/收藏/忽略更新 |
@@ -370,12 +393,12 @@ huangguo-collector/
 
 镜像已发布到 Docker Hub（`linux/amd64`，适配 Z4 Pro）：
 
-- **镜像**：`jokermelove/huangguo-collector:1.7.1`（另有 `latest`）
+- **镜像**：`jokermelove/huangguo-collector:1.8.0`（另有 `latest`）
 - **GitHub**：<https://github.com/king-joker-z/huangguo-collector>
 - **Actions**：推送到 `main` 自动构建并推送 Docker Hub，也可在 Actions 页手动 `Run workflow`
 
 ```sh
-docker pull jokermelove/huangguo-collector:1.7.1
+docker pull jokermelove/huangguo-collector:1.8.0
 ```
 
 ### 方式 A：极空间直接拉取镜像（推荐）
@@ -401,7 +424,7 @@ docker compose -f docker-compose.zspace.yml up -d
 本机有 Docker 时：
 
 ```sh
-docker build --platform linux/amd64 -t jokermelove/huangguo-collector:1.7.1 .
+docker build --platform linux/amd64 -t jokermelove/huangguo-collector:1.8.0 .
 # 或
 docker compose up -d --build
 ```
@@ -447,13 +470,3 @@ docker exec huangguo-collector df -h /data /downloads
 ## 13. 免责声明
 
 本项目只做本地采集与媒体库整理，不托管、不分发任何内容。请自行确认内容合法性、年龄限制与站点服务条款；因使用产生的任何后果由使用者承担。
-
-
-
-
-
-
-
-
-
-

@@ -1,4 +1,4 @@
-﻿/* 黄果媒体库 · 前端（无构建依赖） */
+/* 黄果媒体库 · 前端（无构建依赖） */
 (() => {
   'use strict';
 
@@ -41,6 +41,7 @@
     total: 0,
     pages: 1,
     selected: new Set(),
+    filteredIds: [],
     selectMode: false,
     tags: [],
     excludedTags: [],
@@ -56,6 +57,8 @@
     history: [],
     subscriptions: [],
     schedules: [],
+    duplicates: [],
+    scanRuns: [],
     covers: { state: 'idle' },
     lastCoverState: 'idle',
     lastScanState: 'idle',
@@ -162,7 +165,7 @@
     if (!parts.length) return { name: 'library' };
     if (parts[0] === 'module' && parts[1]) return { name: 'module', module: parts[1] };
     if (parts[0] === 'drama' && parts[1]) return { name: 'drama', id: Number(parts[1]) };
-    if (['library', 'updates', 'downloads', 'tags', 'settings', 'subscriptions', 'schedules'].includes(parts[0])) return { name: parts[0] };
+    if (['library', 'updates', 'downloads', 'tags', 'settings', 'subscriptions', 'schedules', 'duplicates', 'scans'].includes(parts[0])) return { name: parts[0] };
     return { name: 'library' };
   }
 
@@ -179,6 +182,8 @@
     else if (r.name === 'tags') document.title = '标签管理 · 黄果媒体库';
     else if (r.name === 'settings') document.title = '设置 · 黄果媒体库';
     else if (r.name === 'subscriptions') document.title = '订阅追更 · 黄果媒体库';
+    else if (r.name === 'duplicates') document.title = '重复剧 · 黄果媒体库';
+    else if (r.name === 'scans') document.title = '扫描历史 · 黄果媒体库';
     else if (r.name === 'schedules') document.title = '定时任务 · 黄果媒体库';
     else document.title = '黄果媒体库 · Huangguo Library';
   }
@@ -243,6 +248,7 @@
     const queuedTasks = ((state.activity && state.activity.summary) || {}).queued || 0;
     $('#nav-tasks').textContent = activeTasks + queuedTasks;
     $('#nav-subs').textContent = s.subscriptions || 0;
+    $('#nav-dups').textContent = s.duplicates || 0;
     $$('.snav').forEach((link) => link.classList.toggle('on', link.dataset.nav === state.route.name));
 
     const used = s.storage_bytes || 0;
@@ -257,7 +263,7 @@
     if (state.health) {
       const ok = state.health.ffmpeg;
       $('#health-dot').style.background = ok ? 'var(--ok)' : 'var(--accent)';
-      $('#health-text').textContent = ok ? `v1.7.1 · ${state.health.workers || 0} 路下载` : 'ffmpeg 未就绪';
+      $('#health-text').textContent = ok ? `v1.8.0 · ${state.health.workers || 0} 路下载` : 'ffmpeg 未就绪';
     }
   }
 
@@ -504,6 +510,7 @@
       </select>
       <button class="toggle ${state.status === 'none' ? 'on' : ''}" data-action="toggle-unwatched"><span class="sw"></span>只看未下载</button>
       <button class="toggle ${pageAllSelected() ? 'on' : ''}" data-action="select-page"><span class="sw"></span>全选当前</button>
+      <button class="btn sm ${state.filteredIds.length && state.filteredIds.every((id) => state.selected.has(id)) ? 'on' : ''}" data-action="select-filtered">${state.filteredIds.length && state.filteredIds.every((id) => state.selected.has(id)) ? '已全选筛选结果' : '全选筛选结果'}</button>
       <div class="progress"><span>已下载 <b>${done}</b> / ${total} 集</span><div class="pbar"><i style="width:${progress}%"></i></div></div>
     </div>`;
   }
@@ -638,6 +645,31 @@
     if (pageAllSelected()) state.items.forEach((item) => state.selected.delete(item.id));
     else state.items.forEach((item) => state.selected.add(item.id));
     syncSelectionDOM();
+  }
+
+  async function selectFiltered() {
+    const allSelected = state.filteredIds.length > 0 && state.filteredIds.every((id) => state.selected.has(id));
+    if (allSelected) {
+      state.filteredIds.forEach((id) => state.selected.delete(id));
+      state.filteredIds = [];
+      syncSelectionDOM();
+      return;
+    }
+    const params = new URLSearchParams({
+      module: state.module, q: state.q, status: state.status, tag: state.tag,
+      site_tag: state.siteTag, sort: state.sort,
+      score_min: String(state.scoreMin || 0), year: String(state.year || 0),
+    });
+    try {
+      const res = await api('/drama-ids?' + params.toString());
+      const ids = (res.ids || []).map(Number);
+      if (!ids.length) { toast('当前筛选没有剧集', 'err'); return; }
+      if (ids.length > 200 && !confirm(`当前筛选共 ${ids.length} 部，确定全部选中？后续批量操作会作用于全部。`)) return;
+      state.filteredIds = ids;
+      state.selected = new Set(ids);
+      syncSelectionDOM();
+      toast(`已选中筛选结果 ${ids.length} 部`, 'ok');
+    } catch (err) { toast(err.message, 'err'); }
   }
 
   // ------------------------------------------------------------------- detail
@@ -1116,6 +1148,77 @@
   }
 
   // --------------------------------------------------------------------- tags
+  async function renderScansView() {
+    const token = ++renderToken;
+    $('#view').innerHTML = '<div class="skeleton" style="height:120px;border-radius:12px"></div>';
+    try {
+      const res = await api('/scans?limit=60');
+      if (token !== renderToken) return;
+      state.scanRuns = res.items || [];
+      $('#view').innerHTML = `
+        <div class="page-head"><h1>扫描历史</h1><p>最近 60 次扫库记录；中断后可继续（已同步详情会跳过）</p></div>
+        ${state.scanRuns.length ? state.scanRuns.map((run) => {
+          const opts = run.options || {};
+          const modules = (opts.modules || []).map(moduleLabel).join(' / ') || run.module || '—';
+          const running = run.state === 'running';
+          const resumable = ['canceled', 'error', 'interrupted'].includes(run.state);
+          const stateText = running ? '扫描中' : run.state === 'done' ? '完成' : run.state === 'canceled' ? '已停止' : run.state === 'error' ? '异常' : run.state === 'interrupted' ? '已中断' : run.state;
+          return `<div class="scan-run ${run.state}">
+            <div class="scan-run-main">
+              <div class="scan-run-title"><b>#${run.id}</b><span class="state">${h(stateText)}</span><span>${h(modules)}</span></div>
+              <div class="scan-run-sub">${h(shortTime(run.started_at) || '')} → ${h(shortTime(run.finished_at) || '进行中')}</div>
+              <div class="scan-run-stats"><span>发现 <b>${run.found || 0}</b></span><span>新增 <b>${run.new_count || 0}</b></span><span>更新 <b>${run.updated_count || 0}</b></span></div>
+              <div class="scan-run-msg">${h(run.message || '')}</div>
+            </div>
+            <div class="scan-run-actions">
+              ${run.resumed_from ? `<span class="tag">续 #${run.resumed_from}</span>` : ''}
+              ${resumable ? `<button class="btn sm pri" data-action="scan-resume" data-id="${run.id}">继续扫描</button>` : ''}
+              ${running ? '<span class="tag">进行中</span>' : ''}
+            </div>
+          </div>`;
+        }).join('') : emptyHTML('还没有扫描记录', '开始一次采集后，这里会保留历史。', '开始采集', 'open-scan')}
+      `;
+    } catch (err) {
+      if (token === renderToken) $('#view').innerHTML = emptyHTML('扫描历史加载失败', err.message, '重试', 'reload');
+    }
+  }
+
+  async function renderDuplicatesView() {
+    const token = ++renderToken;
+    $('#view').innerHTML = '<div class="skeleton" style="height:120px;border-radius:12px"></div>';
+    try {
+      const res = await api('/duplicates');
+      if (token !== renderToken) return;
+      state.duplicates = res.groups || [];
+      $('#view').innerHTML = `
+        <div class="page-head"><h1>重复剧</h1><p>同名剧只展示一个版本；可手动指定主版本</p></div>
+        ${state.duplicates.length ? state.duplicates.map((group) => `
+          <div class="dup-group">
+            <div class="dup-head"><b>${h(group.title)}</b><span>${group.items.length} 个版本</span>${group.manual ? '<span class="pill warn">手动指定</span>' : ''}</div>
+            <div class="dup-grid">
+              ${group.items.map((item) => `<div class="dup-card ${item.is_duplicate ? 'hidden-version' : 'preferred'}">
+                <img src="${h(item.cover || '')}" alt="" onerror="this.style.visibility='hidden'">
+                <div class="dup-main">
+                  <div class="dup-title">${h(item.title)}</div>
+                  <div class="dup-sub">${h(item.source_label || '')} · ${h(item.module_label || '')} · ${item.done_ep || 0}/${item.total_ep || 0} 集</div>
+                  <div class="dup-tags">
+                    <span class="tag">${item.is_duplicate ? '已隐藏' : '当前展示'}</span>
+                    ${item.manual_preferred ? '<span class="tag">手动主版本</span>' : ''}
+                  </div>
+                </div>
+                <div class="dup-actions">
+                  ${item.is_duplicate ? `<button class="btn sm pri" data-action="dup-prefer" data-id="${item.id}">设为主版本</button>` : ''}
+                  ${!item.is_duplicate && group.manual ? `<button class="btn sm ghost" data-action="dup-auto" data-id="${item.id}">恢复自动</button>` : ''}
+                </div>
+              </div>`).join('')}
+            </div>
+          </div>`).join('') : emptyHTML('没有同名重复剧', '当前媒体库没有同名分组。', '', '')}
+      `;
+    } catch (err) {
+      if (token === renderToken) $('#view').innerHTML = emptyHTML('重复剧加载失败', err.message, '重试', 'reload');
+    }
+  }
+
   async function renderTagsView() {
     await loadTags();
     const tags = state.tags || [];
@@ -1231,7 +1334,7 @@
               <div class="health-item"><span>下载线程</span><b>${health.workers || 0} 路</b></div>
               <div class="health-item"><span>磁盘剩余</span><b>${fmtBytes(health.disk_free || 0)}</b></div>
               <div class="health-item"><span>媒体库占用</span><b>${fmtBytes((state.stats && state.stats.storage_bytes) || 0)}</b></div>
-              <div class="health-item"><span>服务版本</span><b>${h(health.version || '1.7.1')}</b></div>
+              <div class="health-item"><span>服务版本</span><b>${h(health.version || '1.8.0')}</b></div>
             </div>
             <div style="display:flex;gap:6px;margin-top:10px">
               <button class="btn sm" data-action="site-check" data-source="huangguo">测试黄果</button>
@@ -1740,6 +1843,7 @@
   function applyFilters() {
     state.page = 1;
     state.selected.clear();
+    state.filteredIds = [];
     updateBatchBar();
     updateHeader();
     updateSidebarCounts();
@@ -1789,6 +1893,7 @@
       case 'set-module': {
         const mod = el.dataset.module;
         state.module = mod; state.page = 1;
+        state.selected.clear(); state.filteredIds = []; updateBatchBar();
         if (mod === 'all') {
           if (state.route.name === 'library') loadLibrary(); else navigate('/library');
         } else if (state.route.name === 'module' && state.route.module === mod) {
@@ -1824,6 +1929,7 @@
         window.scrollTo({ top: 0, behavior: 'smooth' });
         break;
       case 'select-page': selectPage(); break;
+      case 'select-filtered': await selectFiltered(); break;
       case 'toggle-select': toggleSelect(id); break;
       case 'open-detail': navigate(`/drama/${id}`); break;
       case 'quick-watch': openPlayer(id, 1); break;
@@ -1878,6 +1984,36 @@
       case 'batch-scan': {
         const res = await api('/dramas/batch', { method: 'POST', body: { ids: [...state.selected], action: 'scan' } }).catch((err) => ({ message: err.message }));
         toast(res.message || '已开始同步', 'ok');
+        break;
+      }
+      case 'scan-resume': {
+        try {
+          const res = await api(`/scans/${id}/resume`, { method: 'POST' });
+          toast(res.message || '已继续扫描', 'ok');
+          refreshActivity();
+          renderScansView();
+        } catch (err) { toast(err.message, 'err'); }
+        break;
+      }
+      case 'dup-prefer': {
+        if (!confirm('设为主版本？会合并重复版本的标签和收藏，已下载文件不会删除。')) break;
+        try {
+          const res = await api(`/duplicates/${id}/prefer`, { method: 'POST', body: { merge_metadata: true } });
+          state.duplicates = res.groups || [];
+          toast(res.message || '已设为主版本', 'ok');
+          await loadStats();
+          renderDuplicatesView();
+        } catch (err) { toast(err.message, 'err'); }
+        break;
+      }
+      case 'dup-auto': {
+        try {
+          const res = await api(`/duplicates/${id}/auto`, { method: 'POST' });
+          state.duplicates = res.groups || [];
+          toast(res.message || '已恢复自动选择', 'ok');
+          await loadStats();
+          renderDuplicatesView();
+        } catch (err) { toast(err.message, 'err'); }
         break;
       }
       case 'batch-fav': {
@@ -2345,8 +2481,12 @@
       await renderTagsView();
     } else if (r.name === 'subscriptions') {
       await renderSubscriptionsView();
+    } else if (r.name === 'duplicates') {
+      await renderDuplicatesView();
     } else if (r.name === 'schedules') {
       await renderSchedulesView();
+    } else if (r.name === 'scans') {
+      await renderScansView();
     } else if (r.name === 'settings') {
       await renderSettingsView();
     }
@@ -2366,16 +2506,3 @@
 
   boot();
 })();
-
-
-
-
-
-
-
-
-
-
-
-
-

@@ -1,11 +1,11 @@
-﻿version: "3.9"
+version: "3.9"
 
 services:
   huangguo:
     build:
       context: .
       dockerfile: Dockerfile
-    image: jokermelove/huangguo-collector:1.7.1
+    image: jokermelove/huangguo-collector:1.8.0
     container_name: huangguo-collector
     restart: unless-stopped
     init: true
@@ -25,11 +25,3 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
-
-
-
-
-
-
-
-

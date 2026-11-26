@@ -39,6 +39,7 @@ class ScanManager:
         self.cancel_event = threading.Event()
         self.thread: threading.Thread | None = None
         self.job = self._idle()
+        self.db.mark_interrupted_scan_runs()
 
     @staticmethod
     def _idle() -> dict:
@@ -58,6 +59,7 @@ class ScanManager:
             "started_at": "",
             "finished_at": "",
             "errors": [],
+            "run_id": 0,
         }
 
     def status(self) -> dict:
@@ -67,7 +69,7 @@ class ScanManager:
             return data
 
     def start(self, modules: list[str], details: bool = True, max_pages: int | None = None,
-              refresh: bool = False) -> tuple[bool, str]:
+              refresh: bool = False, resumed_from: int = 0) -> tuple[bool, str]:
         modules = [m for m in modules if m in MODULES]
         if not modules:
             return False, "没有有效的模块"
@@ -75,6 +77,7 @@ class ScanManager:
             if self.job.get("state") == "running":
                 return False, "已有扫描任务在进行中"
             self.cancel_event.clear()
+            run_id = self.db.create_scan_run(modules, details, max_pages, refresh, resumed_from)
             self.job = self._idle()
             self.job.update(
                 {
@@ -82,8 +85,9 @@ class ScanManager:
                     "modules": modules,
                     "module": modules[0],
                     "module_label": MODULES[modules[0]]["label"],
-                    "message": "准备开始",
+                    "message": "继续上次扫描（已完成详情会跳过）" if resumed_from else "准备开始",
                     "started_at": now_str(),
+                    "run_id": run_id,
                 }
             )
             self.thread = threading.Thread(
@@ -91,6 +95,20 @@ class ScanManager:
             )
             self.thread.start()
         return True, "扫描已开始"
+
+    def resume(self, run_id: int) -> tuple[bool, str]:
+        run = self.db.get_scan_run(run_id)
+        if not run:
+            return False, "扫描记录不存在"
+        options = run.get("options") or {}
+        modules = options.get("modules") or ["original", "duanju", "manju"]
+        return self.start(
+            modules,
+            details=bool(options.get("details", True)),
+            max_pages=options.get("max_pages"),
+            refresh=False,
+            resumed_from=int(run_id),
+        )
 
     def cancel(self) -> None:
         self.cancel_event.set()
@@ -107,6 +125,16 @@ class ScanManager:
             errors = list(self.job.get("errors") or [])
             errors.append(f"{datetime.now().strftime('%H:%M:%S')} {message}")
             self.job["errors"] = errors[-30:]
+
+    def _finish(self, state: str, message: str) -> None:
+        with self.lock:
+            self.job.update(state=state, message=message, finished_at=now_str())
+            run_id = int(self.job.get("run_id") or 0)
+            found = int(self.job.get("found") or 0)
+            new_count = int(self.job.get("new_count") or 0)
+            updated = int(self.job.get("updated_count") or 0)
+        if run_id:
+            self.db.finish_scan_run(run_id, state, found, new_count, updated, message)
 
     def _run(self, modules: list[str], details: bool, max_pages: int | None, refresh: bool) -> None:
         seen_detail_ids: set[int] = set()
@@ -213,19 +241,16 @@ class ScanManager:
                                     )
 
             if self.cancel_event.is_set():
-                self._update(state="canceled", message="扫描已停止", finished_at=now_str())
+                self._finish("canceled", "扫描已停止，可到扫描历史继续")
             else:
-                self._update(
-                    state="done",
-                    message=(
-                        f"完成：发现 {self.job['found']} 部，新增 {self.job['new_count']} 部，"
-                        f"更新 {self.job['updated_count']} 部"
-                    ),
-                    finished_at=now_str(),
+                self._finish(
+                    "done",
+                    f"完成：发现 {self.job['found']} 部，新增 {self.job['new_count']} 部，"
+                    f"更新 {self.job['updated_count']} 部",
                 )
         except Exception as exc:
             self._error(f"扫描异常: {exc}")
-            self._update(state="error", message=f"扫描异常: {exc}", finished_at=now_str())
+            self._finish("error", f"扫描异常: {exc}")
 
     def _detail_one(self, drama_id: int, refresh: bool) -> None:
         row = self.db.get_drama(drama_id)
