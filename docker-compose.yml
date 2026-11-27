@@ -1,11 +1,11 @@
-﻿version: "3.9"
+version: "3.9"
 
 services:
   huangguo:
     build:
       context: .
       dockerfile: Dockerfile
-    image: jokermelove/huangguo-collector:1.9.1
+    image: jokermelove/huangguo-collector:1.11.1
     container_name: huangguo-collector
     restart: unless-stopped
     init: true

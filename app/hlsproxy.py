@@ -43,6 +43,38 @@ class HlsProxy:
         # 每个分片 token 对应自己的 CDN 鉴权头，避免并发播放时串用其他集的 auth。
         self.stream_headers: dict[str, tuple[float, dict[str, str]]] = {}
         self.lock = threading.RLock()
+        self._extra_hosts: set[str] | None = None
+        self._extra_hosts_at = 0.0
+
+    def _collect_extra_hosts(self) -> set[str]:
+        """从各适配器收集站点域名与 cdn_hosts，扩展播放代理白名单。"""
+        hosts: set[str] = set()
+        for site_scraper in self.scrapers.values():
+            base = getattr(site_scraper, "site_base", "") or ""
+            host = (urlparse(base).hostname or "").lower()
+            if host:
+                hosts.add(host)
+            for item in getattr(site_scraper, "cdn_hosts", ()) or ():
+                text = str(item).strip().lower().lstrip(".")
+                if text:
+                    hosts.add(text)
+            # 动态域名（欧美影视：get_playback 见过的媒体 CDN）
+            allowed_hosts = getattr(site_scraper, "allowed_hosts", None)
+            if callable(allowed_hosts):
+                try:
+                    hosts.update(h.lower() for h in allowed_hosts() if h)
+                except Exception:
+                    pass
+        return hosts
+
+    def _extra_hosts_set(self) -> set[str]:
+        with self.lock:
+            now = time.time()
+            # 周期性重建，让运行期发现的 CDN 域名进入白名单。
+            if self._extra_hosts is None or now - self._extra_hosts_at > 60:
+                self._extra_hosts = self._collect_extra_hosts()
+                self._extra_hosts_at = now
+            return self._extra_hosts
 
     # ------------------------------------------------------------------ signing
     def sign(self, url: str) -> str:
@@ -132,10 +164,14 @@ class HlsProxy:
     def _headers_for(self, url: str) -> dict[str, str]:
         return {"User-Agent": USER_AGENT, "Referer": SITE_BASE + "/", "Accept": "*/*"}
 
-    @staticmethod
-    def _allowed(url: str) -> bool:
+    def _allowed(self, url: str) -> bool:
         host = (urlparse(url).hostname or "").lower()
-        return host == "huangguoai.com" or host.endswith(ALLOWED_SUFFIXES)
+        if host == "huangguoai.com" or host.endswith(ALLOWED_SUFFIXES):
+            return True
+        for allowed in self._extra_hosts_set():
+            if host == allowed or host.endswith("." + allowed):
+                return True
+        return False
 
     def stream(self, url: str, token: str, range_header: str = "") -> StreamingResponse:
         if not self.verify(url, token) or not self._allowed(url):

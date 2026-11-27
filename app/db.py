@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import re
 import sqlite3
@@ -11,7 +12,7 @@ import unicodedata
 from datetime import datetime
 from typing import Any, Iterable
 
-from .config import DB_PATH, MODULES, SOURCES
+from .config import DB_PATH, MODULES, SOURCES, modules_in_group
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS dramas (
@@ -26,6 +27,8 @@ CREATE TABLE IF NOT EXISTS dramas (
     manual_preferred INTEGER DEFAULT 0,
     keep_separate INTEGER DEFAULT 0,
     title TEXT NOT NULL,
+    title_zh TEXT DEFAULT '',
+    actors_json TEXT DEFAULT '[]',
     url TEXT NOT NULL,
     cover_url TEXT DEFAULT '',
     cover_path TEXT DEFAULT '',
@@ -41,6 +44,7 @@ CREATE TABLE IF NOT EXISTS dramas (
     tags_json TEXT DEFAULT '[]',
     badges_json TEXT DEFAULT '[]',
     year INTEGER,
+    creator_key TEXT DEFAULT '',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     last_scraped_at TEXT,
@@ -94,6 +98,14 @@ CREATE TABLE IF NOT EXISTS drama_tags (
 );
 CREATE INDEX IF NOT EXISTS idx_drama_tags_tag ON drama_tags(tag_id);
 
+CREATE TABLE IF NOT EXISTS group_tags (
+    group_key TEXT NOT NULL,
+    tag_id INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (group_key, tag_id)
+);
+CREATE INDEX IF NOT EXISTS idx_group_tags_group ON group_tags(group_key);
+
 CREATE TABLE IF NOT EXISTS excluded_tags (
     name TEXT PRIMARY KEY,
     created_at TEXT NOT NULL
@@ -131,6 +143,31 @@ CREATE TABLE IF NOT EXISTS subscriptions (
 );
 CREATE INDEX IF NOT EXISTS idx_subscriptions_enabled ON subscriptions(enabled);
 
+-- 演员订阅（博主 / 创作者页面）：欧美影视分区的采集入口。
+-- 一个演员订阅对应博主页 URL，扫描时作为该模块的一个「列表」采集。
+CREATE TABLE IF NOT EXISTS creator_subs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source TEXT NOT NULL DEFAULT 'ph',
+    creator_key TEXT NOT NULL,
+    name TEXT DEFAULT '',
+    page_url TEXT NOT NULL,
+    avatar_url TEXT DEFAULT '',
+    avatar_path TEXT DEFAULT '',
+    enabled INTEGER DEFAULT 1,
+    auto_download INTEGER DEFAULT 1,
+    quality TEXT DEFAULT '',
+    max_pages INTEGER DEFAULT 0,
+    last_scan_at TEXT,
+    last_new_count INTEGER DEFAULT 0,
+    last_auto_at TEXT,
+    last_auto_count INTEGER DEFAULT 0,
+    video_count INTEGER DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(source, creator_key)
+);
+CREATE INDEX IF NOT EXISTS idx_creator_subs_enabled ON creator_subs(enabled);
+
 CREATE TABLE IF NOT EXISTS schedules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
@@ -164,6 +201,14 @@ CREATE TABLE IF NOT EXISTS scan_runs (
     resumed_from INTEGER DEFAULT 0,
     started_at TEXT,
     finished_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS translations (
+    source_hash TEXT PRIMARY KEY,
+    source_text TEXT NOT NULL,
+    target TEXT NOT NULL,
+    translated TEXT NOT NULL,
+    created_at TEXT NOT NULL
 );
 """
 
@@ -204,6 +249,10 @@ def json_dumps(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
+def translation_hash(source_text: str, target: str) -> str:
+    return hashlib.sha1(f"{target}\x00{source_text}".encode("utf-8")).hexdigest()
+
+
 MODULE_ORDER = ("original", "duanju", "manju", "yeguo")
 
 
@@ -218,7 +267,7 @@ class Database:
     def __init__(self, path=DB_PATH) -> None:
         self.lock = threading.RLock()
         self._stats_lock = threading.Lock()
-        self._stats_cache: tuple[float, dict] | None = None
+        self._stats_cache: dict[str, tuple[float, dict]] = {}
         self.conn = sqlite3.connect(str(path), check_same_thread=False, timeout=60)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
@@ -242,6 +291,23 @@ class Database:
                 self.conn.execute("ALTER TABLE dramas ADD COLUMN manual_preferred INTEGER DEFAULT 0")
             if "keep_separate" not in columns:
                 self.conn.execute("ALTER TABLE dramas ADD COLUMN keep_separate INTEGER DEFAULT 0")
+            if "title_zh" not in columns:
+                self.conn.execute("ALTER TABLE dramas ADD COLUMN title_zh TEXT DEFAULT ''")
+            if "actors_json" not in columns:
+                self.conn.execute("ALTER TABLE dramas ADD COLUMN actors_json TEXT DEFAULT '[]'")
+            if "creator_key" not in columns:
+                self.conn.execute("ALTER TABLE dramas ADD COLUMN creator_key TEXT DEFAULT ''")
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_dramas_creator ON dramas(creator_key)"
+            )
+            creator_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(creator_subs)")}
+            if "quality" not in creator_columns:
+                # 旧版本 creator_subs 没有 quality 列时补齐（幂等）。
+                self.conn.execute("ALTER TABLE creator_subs ADD COLUMN quality TEXT DEFAULT ''")
+            if "last_auto_at" not in creator_columns:
+                self.conn.execute("ALTER TABLE creator_subs ADD COLUMN last_auto_at TEXT")
+            if "last_auto_count" not in creator_columns:
+                self.conn.execute("ALTER TABLE creator_subs ADD COLUMN last_auto_count INTEGER DEFAULT 0")
             episode_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(episodes)")}
             if "cover_url" not in episode_columns:
                 self.conn.execute("ALTER TABLE episodes ADD COLUMN cover_url TEXT DEFAULT ''")
@@ -330,8 +396,8 @@ class Database:
             if row is None:
                 cur = self.conn.execute(
                     """INSERT INTO dramas(site_id,module,modules_json,source,title_key,title,url,cover_url,score,total_ep,
-                       views,tags_json,badges_json,created_at,updated_at,last_scraped_at)
-                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       views,tags_json,badges_json,creator_key,created_at,updated_at,last_scraped_at)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         site_id,
                         card["module"],
@@ -346,6 +412,7 @@ class Database:
                         card.get("views", ""),
                         json_dumps(card.get("tags", [])),
                         json_dumps(card.get("badges", [])),
+                        str(card.get("creator_key") or ""),
                         ts,
                         ts,
                         ts,
@@ -367,9 +434,11 @@ class Database:
             new_total = max(old_total, total)
             has_update = 1 if old_total > 0 and total > old_total else 0
             old_key = str(row["title_key"] or "")
+            card_creator = str(card.get("creator_key") or "").strip()
             self.conn.execute(
                 """UPDATE dramas SET module=?,modules_json=?,source=?,title_key=?,title=?,url=?,cover_url=?,score=?,
                    total_ep=?,views=?,tags_json=?,badges_json=?,
+                   creator_key=CASE WHEN ?<>'' THEN ? ELSE creator_key END,
                    last_scraped_at=?,
                    prev_total_ep=CASE WHEN ?=1 THEN ? ELSE prev_total_ep END,
                    has_update=CASE WHEN ?=1 THEN 1 ELSE has_update END
@@ -387,6 +456,8 @@ class Database:
                     card.get("views", ""),
                     json_dumps(card.get("tags", [])),
                     json_dumps(card.get("badges", [])),
+                    card_creator,
+                    card_creator,
                     ts,
                     1 if has_update else 0,
                     old_total,
@@ -415,10 +486,12 @@ class Database:
             incoming_title = str(detail.get("title") or row["title"] or "")
             key = title_key(incoming_title)
             has_update = old_total > 0 and int(detail.get("total_ep") or 0) > old_total
+            creator_key = str(detail.get("creator_key") or "").strip()
             self.conn.execute(
                 """UPDATE dramas SET title=?,title_key=?,description=?,cover_url=?,score=?,total_ep=?,
                    author=?,status_text=?,views=?,premiered=?,duration_text=?,category_text=?,
                    tags_json=?,year=?,updated_at=?,detail_scraped_at=?,
+                   creator_key=CASE WHEN ?<>'' THEN ? ELSE creator_key END,
                    prev_total_ep=CASE WHEN ?=1 THEN ? ELSE prev_total_ep END,
                    has_update=CASE WHEN ?=1 THEN 1 ELSE has_update END
                    WHERE id=?""",
@@ -438,6 +511,8 @@ class Database:
                     detail.get("year"),
                     ts,
                     ts,
+                    creator_key,
+                    creator_key,
                     1 if has_update else 0,
                     old_total,
                     1 if has_update else 0,
@@ -445,6 +520,12 @@ class Database:
                 ),
             )
             episodes = detail.get("episodes") or []
+            actors = detail.get("actors")
+            if actors is not None:
+                self.conn.execute(
+                    "UPDATE dramas SET actors_json=? WHERE id=?",
+                    (json_dumps(actors), row["id"]),
+                )
             for ep in episodes:
                 self.conn.execute(
                     """INSERT INTO episodes(drama_id,ep,site_video_id,title,synopsis,duration,cover_url)
@@ -516,9 +597,8 @@ class Database:
         for row in rows:
             self.resolve_title_group(str(row["title_key"]))
 
-    def list_duplicate_groups(self) -> list[dict]:
-        rows = self.query(
-            """SELECT d.*,
+    def list_duplicate_groups(self, scope: str = "") -> list[dict]:
+        sql = """SELECT d.*,
                  (SELECT COUNT(*) FROM episodes e WHERE e.drama_id=d.id AND e.state='done') AS done_ep,
                  (SELECT COUNT(*) FROM episodes e WHERE e.drama_id=d.id) AS ep_rows,
                  (SELECT COUNT(*) FROM subscriptions s WHERE s.drama_id=d.id AND s.enabled=1) AS subscribed_flag,
@@ -528,9 +608,20 @@ class Database:
                WHERE d.title_key<>'' AND d.title_key IN (
                  SELECT title_key FROM dramas WHERE title_key<>''
                  GROUP BY title_key HAVING COUNT(*)>1
-               )
-               ORDER BY d.title_key, d.is_duplicate, d.manual_preferred DESC, d.total_ep DESC, d.id"""
-        )
+               )"""
+        params: list[Any] = []
+        if scope:
+            modules = modules_in_group(scope)
+            if not modules:
+                return []
+            placeholders = ",".join("?" for _ in modules)
+            sql += (
+                " AND EXISTS (SELECT 1 FROM json_each(d.modules_json) jm "
+                f"WHERE jm.value IN ({placeholders}))"
+            )
+            params.extend(modules)
+        sql += " ORDER BY d.title_key, d.is_duplicate, d.manual_preferred DESC, d.total_ep DESC, d.id"
+        rows = self.query(sql, params)
         groups: dict[str, dict] = {}
         for row in rows:
             item = self._drama_dict(row)
@@ -632,6 +723,41 @@ class Database:
     def clear_update(self, drama_id: int) -> None:
         self.execute("UPDATE dramas SET has_update=0, prev_total_ep=total_ep WHERE id=?", (drama_id,))
 
+    # ------------------------------------------------------------- translation
+    def set_title_zh(self, drama_id: int, value: str) -> None:
+        self.execute(
+            "UPDATE dramas SET title_zh=?,updated_at=? WHERE id=?", (value, now_str(), drama_id)
+        )
+
+    def set_actors(self, drama_id: int, actors: list[dict]) -> None:
+        self.execute("UPDATE dramas SET actors_json=? WHERE id=?", (json_dumps(actors), drama_id))
+
+    def get_translation(self, source_text: str, target: str) -> str:
+        row = self.query_one(
+            "SELECT translated FROM translations WHERE source_hash=?",
+            (translation_hash(source_text, target),),
+        )
+        return str(row["translated"]) if row else ""
+
+    def save_translation(self, source_text: str, target: str, translated: str) -> None:
+        self.execute(
+            "INSERT INTO translations(source_hash,source_text,target,translated,created_at) "
+            "VALUES(?,?,?,?,?) ON CONFLICT(source_hash) DO UPDATE SET "
+            "translated=excluded.translated,created_at=excluded.created_at",
+            (translation_hash(source_text, target), source_text, target, translated, now_str()),
+        )
+
+    def dramas_needing_translation(self, ids: list[int] | None = None,
+                                   group: str = "") -> list[dict]:
+        table = self._scope_table(group)
+        sql = f"SELECT d.id,d.title FROM {table} d WHERE COALESCE(d.title_zh,'')=''"
+        params: list[Any] = []
+        if ids:
+            sql += f" AND d.id IN ({','.join('?' for _ in ids)})"
+            params.extend(ids)
+        sql += " ORDER BY d.id"
+        return [dict(row) for row in self.query(sql, params)]
+
     def need_detail(self, site_id: str) -> bool:
         row = self.get_drama_by_site_id(site_id)
         if not row:
@@ -702,7 +828,7 @@ class Database:
 
     def invalidate_stats(self) -> None:
         with self._stats_lock:
-            self._stats_cache = None
+            self._stats_cache = {}
 
     def _excluded_clause(self, alias: str = "d") -> tuple[str, list[str]]:
         names = self.excluded_tag_names()
@@ -739,23 +865,47 @@ class Database:
         )
         return bool(row)
 
-    def ensure_tag(self, name: str, color: str = "#e5484d", kind: str = "custom") -> int:
+    def ensure_tag(self, name: str, color: str = "#e5484d", kind: str = "custom",
+                   group: str = "") -> int:
         row = self.query_one("SELECT id FROM tags WHERE name=?", (name,))
         if row:
-            return int(row["id"])
-        cur = self.execute(
-            "INSERT INTO tags(name,color,kind,created_at) VALUES(?,?,?,?)",
-            (name, color, kind, now_str()),
-        )
-        return int(cur.lastrowid)
+            tag_id = int(row["id"])
+        else:
+            cur = self.execute(
+                "INSERT INTO tags(name,color,kind,created_at) VALUES(?,?,?,?)",
+                (name, color, kind, now_str()),
+            )
+            tag_id = int(cur.lastrowid)
+        if group:
+            self.execute(
+                "INSERT OR IGNORE INTO group_tags(group_key,tag_id,created_at) VALUES(?,?,?)",
+                (group, tag_id, now_str()),
+            )
+        return tag_id
 
-    def list_tags(self) -> list[dict]:
+    def list_tags(self, group: str = "") -> list[dict]:
+        table = self._scope_table(group)
         rows = self.query(
-            """SELECT t.*, (SELECT COUNT(*) FROM drama_tags dt WHERE dt.tag_id=t.id) AS count
+            f"""SELECT t.*, (SELECT COUNT(*) FROM drama_tags dt
+                     JOIN {table} d ON d.id=dt.drama_id
+                     WHERE dt.tag_id=t.id) AS count
                FROM tags t ORDER BY t.kind='system' DESC, t.id"""
         )
         excluded = set(self.excluded_tag_names())
-        return [{**dict(r), "excluded": str(r["name"]) in excluded} for r in rows]
+        items = [{**dict(r), "excluded": str(r["name"]) in excluded} for r in rows]
+        if group:
+            # 分区隔离：只显示本分区创建或本分区有剧集使用的标签。
+            owned = {
+                int(r["tag_id"])
+                for r in self.query(
+                    "SELECT tag_id FROM group_tags WHERE group_key=?", (group,)
+                )
+            }
+            items = [
+                item for item in items
+                if int(item["id"]) in owned or int(item.get("count") or 0) > 0
+            ]
+        return items
 
     def tags_for_drama(self, drama_id: int) -> list[dict]:
         rows = self.query(
@@ -793,12 +943,13 @@ class Database:
     def delete_tag(self, tag_id: int) -> None:
         self.execute("DELETE FROM tags WHERE id=?", (tag_id,))
 
-    def set_drama_tags(self, drama_id: int, add: list[str], remove: list[str]) -> None:
+    def set_drama_tags(self, drama_id: int, add: list[str], remove: list[str],
+                       group: str = "") -> None:
         for name in add:
             name = name.strip()
             if not name:
                 continue
-            tag_id = self.ensure_tag(name)
+            tag_id = self.ensure_tag(name, group=group)
             self.add_tag_to_drama(drama_id, tag_id)
         for name in remove:
             row = self.query_one("SELECT id FROM tags WHERE name=?", (name.strip(),))
@@ -832,9 +983,10 @@ class Database:
             (now_str(), int(count), drama_id),
         )
 
-    def list_subscriptions(self) -> list[dict]:
+    def list_subscriptions(self, group: str = "") -> list[dict]:
+        table = self._scope_table(group)
         rows = self.query(
-            """SELECT d.*,
+            f"""SELECT d.*,
                  s.quality AS sub_quality,
                  s.auto_download AS sub_auto,
                  s.enabled AS sub_enabled,
@@ -846,7 +998,7 @@ class Database:
                  (SELECT COUNT(*) FROM episodes e WHERE e.drama_id=d.id AND e.state='done') AS done_ep,
                  (SELECT COUNT(*) FROM episodes e WHERE e.drama_id=d.id) AS ep_rows,
                  (SELECT COUNT(*) FROM tasks t WHERE t.drama_id=d.id AND t.state IN ('queued','downloading')) AS active_tasks
-               FROM subscriptions s JOIN visible_dramas d ON d.id=s.drama_id
+               FROM subscriptions s JOIN {table} d ON d.id=s.drama_id
                ORDER BY d.has_update DESC, s.created_at DESC"""
         )
         items = [self._drama_dict(r) for r in rows]
@@ -855,8 +1007,114 @@ class Database:
             item["tags"] = tag_map.get(item["id"], [])
         return items
 
+    # ------------------------------------------------------------- creator subs
+    def list_creator_subs(self, source: str = "ph", enabled_only: bool = False) -> list[dict]:
+        sql = "SELECT * FROM creator_subs"
+        params: list[Any] = []
+        if source:
+            sql += " WHERE source=?"
+            params.append(source)
+            if enabled_only:
+                sql += " AND enabled=1"
+        elif enabled_only:
+            sql += " WHERE enabled=1"
+        sql += " ORDER BY id"
+        return [dict(row) for row in self.query(sql, params)]
+
+    def get_creator_sub(self, creator_id: int) -> dict | None:
+        row = self.query_one("SELECT * FROM creator_subs WHERE id=?", (int(creator_id),))
+        return dict(row) if row else None
+
+    def get_creator_sub_by_key(self, source: str, creator_key: str) -> dict | None:
+        if not creator_key:
+            return None
+        row = self.query_one(
+            "SELECT * FROM creator_subs WHERE source=? AND creator_key=?",
+            (str(source), str(creator_key)),
+        )
+        return dict(row) if row else None
+
+    def insert_creator_sub(self, source: str, creator_key: str, name: str, page_url: str,
+                           avatar_url: str = "", avatar_path: str = "",
+                           auto_download: bool = True, quality: str = "",
+                           max_pages: int = 0, enabled: bool = True) -> int:
+        ts = now_str()
+        cur = self.execute(
+            """INSERT INTO creator_subs(source,creator_key,name,page_url,avatar_url,avatar_path,
+               enabled,auto_download,quality,max_pages,created_at,updated_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(source,creator_key) DO UPDATE SET
+                 name=excluded.name,page_url=excluded.page_url,
+                 avatar_url=excluded.avatar_url,updated_at=excluded.updated_at""",
+            (
+                str(source), str(creator_key), str(name or ""), str(page_url),
+                str(avatar_url or ""), str(avatar_path or ""),
+                1 if enabled else 0, 1 if auto_download else 0,
+                str(quality or ""), int(max_pages or 0), ts, ts,
+            ),
+        )
+        return int(cur.lastrowid)
+
+    def update_creator_sub(self, creator_id: int, **fields: Any) -> None:
+        allowed = {
+            "name", "page_url", "avatar_url", "avatar_path", "creator_key",
+            "enabled", "auto_download", "quality", "max_pages",
+        }
+        parts, params = [], []
+        for key, value in fields.items():
+            if key not in allowed:
+                continue
+            if isinstance(value, bool):
+                value = 1 if value else 0
+            parts.append(f"{key}=?")
+            params.append(value)
+        if not parts:
+            return
+        parts.append("updated_at=?")
+        params.append(now_str())
+        params.append(int(creator_id))
+        self.execute(
+            f"UPDATE creator_subs SET {', '.join(parts)} WHERE id=?", params
+        )
+
+    def delete_creator_sub(self, creator_id: int) -> None:
+        self.execute("DELETE FROM creator_subs WHERE id=?", (int(creator_id),))
+
+    def mark_creator_scanned(self, creator_id: int, new_count: int, video_count: int) -> None:
+        self.execute(
+            "UPDATE creator_subs SET last_scan_at=?,last_new_count=?,video_count=?,updated_at=? WHERE id=?",
+            (now_str(), int(new_count), int(video_count), now_str(), int(creator_id)),
+        )
+
+    def mark_creator_auto(self, creator_id: int, count: int) -> None:
+        self.execute(
+            "UPDATE creator_subs SET last_auto_at=?,last_auto_count=?,updated_at=? WHERE id=?",
+            (now_str(), int(count), now_str(), int(creator_id)),
+        )
+
+    def creator_video_stats(self, source: str, creator_key: str) -> dict:
+        """统计某个博主的影片数与已下载数（creator_key 为 '' 时全部为 0）。"""
+        if not creator_key:
+            return {"videos": 0, "done": 0, "downloading": 0}
+        rows = self.query(
+            """SELECT
+                 COUNT(*) AS videos,
+                 SUM(CASE WHEN (SELECT COUNT(*) FROM episodes e
+                          WHERE e.drama_id=d.id AND e.state='done')>0 THEN 1 ELSE 0 END) AS done,
+                 SUM(CASE WHEN (SELECT COUNT(*) FROM tasks t
+                          WHERE t.drama_id=d.id AND t.state IN ('queued','downloading'))>0 THEN 1 ELSE 0 END) AS downloading
+               FROM dramas d WHERE d.source=? AND d.creator_key=?""",
+            (str(source), str(creator_key)),
+        )
+        row = rows[0] if rows else None
+        return {
+            "videos": int((row and row["videos"]) or 0),
+            "done": int((row and row["done"]) or 0),
+            "downloading": int((row and row["downloading"]) or 0),
+        }
+
     # --------------------------------------------------------------- schedules
-    def list_schedules(self) -> list[dict]:
+    def list_schedules(self, group: str = "") -> list[dict]:
         rows = self.query("SELECT * FROM schedules ORDER BY id")
         out = []
         for row in rows:
@@ -870,6 +1128,9 @@ class Database:
             except Exception:
                 item["weekdays"] = []
             out.append(item)
+        if group:
+            allowed = set(modules_in_group(group))
+            out = [item for item in out if allowed & set(item.get("modules") or [])]
         return out
 
     def get_schedule(self, schedule_id: int) -> dict | None:
@@ -964,9 +1225,12 @@ class Database:
         params.append(task_id)
         self.execute(f"UPDATE tasks SET {', '.join(parts)} WHERE id=?", params)
 
-    def list_tasks(self, states: list[str] | None = None, limit: int = 300) -> list[dict]:
-        sql = """SELECT t.*, d.title AS drama_title, d.site_id, d.module
-                 FROM tasks t JOIN dramas d ON d.id=t.drama_id"""
+    def list_tasks(self, states: list[str] | None = None, limit: int = 300,
+                   group: str = "") -> list[dict]:
+        table = self._scope_table(group)
+        sql = f"""SELECT t.*, d.title AS drama_title, d.site_id, d.module
+                 FROM tasks t JOIN dramas d ON d.id=t.drama_id
+                 JOIN {table} s ON s.id=d.id"""
         params: list[Any] = []
         if states:
             sql += f" WHERE t.state IN ({','.join('?' for _ in states)})"
@@ -975,18 +1239,27 @@ class Database:
         params.append(limit)
         return [dict(r) for r in self.query(sql, params)]
 
-    def active_tasks(self) -> list[dict]:
-        return self.list_tasks(["queued", "downloading"], limit=500)
+    def active_tasks(self, group: str = "") -> list[dict]:
+        return self.list_tasks(["queued", "downloading"], limit=500, group=group)
 
     def clear_finished_tasks(self) -> None:
         self.execute("DELETE FROM tasks WHERE state IN ('done','canceled')")
 
-    def clear_tasks(self, states: list[str]) -> None:
+    def clear_tasks(self, states: list[str], group: str = "") -> None:
         allowed = {"done", "canceled", "failed"}
         states = [s for s in states if s in allowed]
         if not states:
             return
-        self.execute(f"DELETE FROM tasks WHERE state IN ({','.join('?' for _ in states)})", states)
+        placeholders = ",".join("?" for _ in states)
+        if group:
+            table = self._scope_table(group)
+            self.execute(
+                f"DELETE FROM tasks WHERE state IN ({placeholders}) "
+                f"AND drama_id IN (SELECT id FROM {table})",
+                states,
+            )
+            return
+        self.execute(f"DELETE FROM tasks WHERE state IN ({placeholders})", states)
 
     def reset_running_tasks(self) -> None:
         self.execute("UPDATE tasks SET state='queued' WHERE state='downloading'")
@@ -1006,9 +1279,21 @@ class Database:
         site_tag: str = "",
         source: str = "",
         include_duplicates: bool = False,
+        group: str = "",
     ) -> dict:
         where: list[str] = []
         params: list[Any] = []
+        if group:
+            group_modules = modules_in_group(group)
+            if not group_modules:
+                per_page = max(1, min(200, per_page))
+                return {"items": [], "total": 0, "page": 1, "pages": 1, "per_page": per_page}
+            placeholders = ",".join("?" for _ in group_modules)
+            where.append(
+                "EXISTS (SELECT 1 FROM json_each(x.modules_json) jm "
+                f"WHERE jm.value IN ({placeholders}))"
+            )
+            params.extend(group_modules)
         if not include_duplicates:
             where.append("x.is_duplicate=0")
         else:
@@ -1110,6 +1395,7 @@ class Database:
         site_tag: str = "",
         source: str = "",
         include_duplicates: bool = False,
+        group: str = "",
     ) -> list[int]:
         """返回当前筛选条件下的全部剧集 ID，供“全选筛选结果”使用。"""
         ids: list[int] = []
@@ -1119,7 +1405,7 @@ class Database:
                 module=module, q=q, status=status, tag=tag, sort=sort,
                 page=page, per_page=200, score_min=score_min, year=year,
                 site_tag=site_tag, source=source,
-                include_duplicates=include_duplicates,
+                include_duplicates=include_duplicates, group=group,
             )
             ids.extend(int(item["id"]) for item in data.get("items", []))
             if page >= int(data.get("pages") or 1):
@@ -1174,6 +1460,19 @@ class Database:
         except Exception:
             d["tags_site"] = []
         try:
+            d["actors"] = json.loads(d.pop("actors_json", "[]") or "[]")
+        except Exception:
+            d["actors"] = []
+        # 翻译只影响展示：DB 里的 title 始终保留站点原文，title_key 去重不受影响。
+        original_title = str(d.get("title") or "")
+        zh_title = str(d.get("title_zh") or "").strip()
+        d["title_original"] = original_title
+        if zh_title and zh_title != original_title:
+            d["title"] = zh_title
+            d["title_translated"] = True
+        else:
+            d["title_translated"] = False
+        try:
             d["badges"] = json.loads(d.pop("badges_json", "[]") or "[]")
         except Exception:
             d["badges"] = []
@@ -1213,14 +1512,46 @@ class Database:
         d["cover"] = f"/covers/{d['site_id']}.jpg" if d.get("cover_path") else (d.get("cover_url") or "")
         return d
 
-    def updates(self, limit: int = 100) -> list[dict]:
+    # ----------------------------------------------------------- group scoping
+    def _scope_table(self, group: str) -> str:
+        """按分区建立临时视图，统计与列表查询共用同一套隔离口径。
+
+        视图名按分区固定（scoped_<group>），内容由 MODULES 配置决定；
+        重复创建是幂等的，避免每次查询都重建。
+        """
+        if not group:
+            return "visible_dramas"
+        name = "scoped_" + (re.sub(r"\W+", "_", group).strip("_") or "group")
+        modules = modules_in_group(group)
+        with self.lock:
+            self.conn.execute(f"DROP VIEW IF EXISTS {name}")
+            if not modules:
+                self.conn.execute(
+                    f"CREATE TEMP VIEW {name} AS SELECT * FROM visible_dramas WHERE 0"
+                )
+            else:
+                values = ",".join("'" + str(m).replace("'", "''") + "'" for m in modules)
+                self.conn.execute(
+                    f"CREATE TEMP VIEW {name} AS SELECT * FROM visible_dramas d "
+                    "WHERE EXISTS (SELECT 1 FROM json_each(d.modules_json) jm "
+                    f"WHERE jm.value IN ({values}))"
+                )
+            self.conn.commit()
+        return name
+
+    def scope_table(self, group: str) -> str:
+        """公开作用域视图名，供封面补全等子系统复用。"""
+        return self._scope_table(group)
+
+    def updates(self, limit: int = 100, group: str = "") -> list[dict]:
+        table = self._scope_table(group)
         rows = self.query(
-            """SELECT d.*,
+            f"""SELECT d.*,
                 (SELECT COUNT(*) FROM episodes e WHERE e.drama_id=d.id AND e.state='done') AS done_ep,
                 (SELECT COUNT(*) FROM subscriptions s WHERE s.drama_id=d.id AND s.enabled=1) AS subscribed_flag,
                 (SELECT s.quality FROM subscriptions s WHERE s.drama_id=d.id LIMIT 1) AS sub_quality,
                 (SELECT s.auto_download FROM subscriptions s WHERE s.drama_id=d.id LIMIT 1) AS sub_auto
-               FROM visible_dramas d WHERE d.has_update=1
+               FROM {table} d WHERE d.has_update=1
                ORDER BY d.updated_at DESC LIMIT ?""",
             (limit,),
         )
@@ -1230,29 +1561,44 @@ class Database:
             item["tags"] = tag_map.get(item["id"], [])
         return items
 
-    def stats(self, ttl: float = 2.0) -> dict:
+    def stats(self, ttl: float = 2.0, group: str = "") -> dict:
+        table = self._scope_table(group)
+        cache_key = group or "*"
         now_mono = time.monotonic()
         if ttl > 0:
             with self._stats_lock:
-                cached = self._stats_cache
+                cached = self._stats_cache.get(cache_key)
                 if cached and now_mono - cached[0] < ttl:
                     return copy.deepcopy(cached[1])
-        total = int(self.query_one("SELECT COUNT(*) n FROM visible_dramas")["n"])
+        total = int(self.query_one(f"SELECT COUNT(*) n FROM {table}")["n"])
         by_module = {
             r["module"]: int(r["n"])
             for r in self.query(
                 "SELECT jm.value AS module, COUNT(*) AS n "
-                "FROM visible_dramas d, json_each(d.modules_json) jm GROUP BY jm.value"
+                f"FROM {table} d, json_each(d.modules_json) jm GROUP BY jm.value"
             )
         }
         by_source = {
             r["source"]: int(r["n"])
             for r in self.query(
-                "SELECT source, COUNT(*) AS n FROM visible_dramas GROUP BY source"
+                f"SELECT source, COUNT(*) AS n FROM {table} GROUP BY source"
             )
         }
+        # 导航页需要看到所有分区的数量，因此这份统计始终跨分区计算。
+        group_modules_map: dict[str, list[str]] = {}
+        for module_key, meta in MODULES.items():
+            group_modules_map.setdefault(str(meta.get("group") or "duanju"), []).append(module_key)
+        group_totals: dict[str, int] = {}
+        for group_key, group_modules in group_modules_map.items():
+            placeholders = ",".join("?" for _ in group_modules)
+            row = self.query_one(
+                "SELECT COUNT(DISTINCT d.id) AS n FROM visible_dramas d, "
+                f"json_each(d.modules_json) jm WHERE jm.value IN ({placeholders})",
+                group_modules,
+            )
+            group_totals[group_key] = int(row["n"]) if row else 0
         status_row = self.query_one(
-            """SELECT
+            f"""SELECT
                  COALESCE(SUM(CASE WHEN active_tasks>0 THEN 1 ELSE 0 END),0) AS downloading,
                  COALESCE(SUM(CASE WHEN active_tasks=0 AND total_ep>0 AND done_ep>=total_ep THEN 1 ELSE 0 END),0) AS done,
                  COALESCE(SUM(CASE WHEN active_tasks=0 AND done_ep>0 AND done_ep<total_ep THEN 1 ELSE 0 END),0) AS partial,
@@ -1264,7 +1610,7 @@ class Database:
                  SELECT d.id,d.total_ep,d.has_update,d.favorite,
                    (SELECT COUNT(*) FROM episodes e WHERE e.drama_id=d.id AND e.state='done') AS done_ep,
                    (SELECT COUNT(*) FROM tasks t WHERE t.drama_id=d.id AND t.state IN ('queued','downloading')) AS active_tasks
-                 FROM visible_dramas d
+                 FROM {table} d
                ) x"""
         )
         status = {
@@ -1280,46 +1626,67 @@ class Database:
         partial = status["partial"]
         updates = status["update"]
         episodes_done = int(self.query_one(
-            "SELECT COUNT(*) n FROM episodes e JOIN visible_dramas d ON d.id=e.drama_id "
+            f"SELECT COUNT(*) n FROM episodes e JOIN {table} d ON d.id=e.drama_id "
             "WHERE e.state='done'"
         )["n"])
         episodes_total = int(self.query_one(
-            "SELECT COUNT(*) n FROM episodes e JOIN visible_dramas d ON d.id=e.drama_id"
+            f"SELECT COUNT(*) n FROM episodes e JOIN {table} d ON d.id=e.drama_id"
         )["n"])
-        storage = int(self.query_one("SELECT COALESCE(SUM(file_size),0) n FROM episodes WHERE state='done'")["n"])
-        active = int(self.query_one("SELECT COUNT(*) n FROM tasks WHERE state IN ('queued','downloading')")["n"])
+        storage = int(self.query_one(
+            f"SELECT COALESCE(SUM(e.file_size),0) n FROM episodes e "
+            f"JOIN {table} d ON d.id=e.drama_id WHERE e.state='done'"
+        )["n"])
+        active = int(self.query_one(
+            f"SELECT COUNT(*) n FROM tasks t JOIN {table} d ON d.id=t.drama_id "
+            "WHERE t.state IN ('queued','downloading')"
+        )["n"])
         subscribed = int(self.query_one(
-            "SELECT COUNT(*) n FROM subscriptions s JOIN visible_dramas d ON d.id=s.drama_id "
+            f"SELECT COUNT(*) n FROM subscriptions s JOIN {table} d ON d.id=s.drama_id "
             "WHERE s.enabled=1"
         )["n"])
         sub_updates = int(self.query_one(
-            "SELECT COUNT(*) n FROM visible_dramas d WHERE d.has_update=1 AND EXISTS "
+            f"SELECT COUNT(*) n FROM {table} d WHERE d.has_update=1 AND EXISTS "
             "(SELECT 1 FROM subscriptions s WHERE s.drama_id=d.id AND s.enabled=1)"
         )["n"])
-        duplicates = int(self.query_one(
-            "SELECT COUNT(*) n FROM dramas WHERE is_duplicate=1"
-        )["n"])
+        if group:
+            modules = modules_in_group(group)
+            if modules:
+                placeholders = ",".join("?" for _ in modules)
+                duplicates = int(self.query_one(
+                    "SELECT COUNT(*) n FROM dramas d WHERE d.is_duplicate=1 AND EXISTS "
+                    "(SELECT 1 FROM json_each(d.modules_json) jm "
+                    f"WHERE jm.value IN ({placeholders}))",
+                    modules,
+                )["n"])
+            else:
+                duplicates = 0
+        else:
+            duplicates = int(self.query_one(
+                "SELECT COUNT(*) n FROM dramas WHERE is_duplicate=1"
+            )["n"])
         status["subscribed"] = subscribed
-        last_row = self.query_one("SELECT MAX(last_scraped_at) AS t FROM dramas")
+        last_row = self.query_one(f"SELECT MAX(last_scraped_at) AS t FROM {table}")
         years = [
             {"year": int(r["year"]), "count": int(r["n"])}
             for r in self.query(
-                "SELECT year, COUNT(*) n FROM visible_dramas WHERE year IS NOT NULL "
+                f"SELECT year, COUNT(*) n FROM {table} WHERE year IS NOT NULL "
                 "GROUP BY year ORDER BY year DESC LIMIT 12"
             )
         ]
         site_tags = [
             {"name": r["name"], "count": int(r["count"])}
             for r in self.query(
-                """SELECT je.value AS name, COUNT(*) AS count
-                   FROM visible_dramas d, json_each(d.tags_json) je
+                f"""SELECT je.value AS name, COUNT(*) AS count
+                   FROM {table} d, json_each(d.tags_json) je
                    WHERE d.tags_json IS NOT NULL AND d.tags_json <> ''
                    GROUP BY je.value ORDER BY count DESC, je.value LIMIT 48"""
             )
         ]
         result = {
             "total": total,
+            "group": group,
             "by_module": by_module,
+            "by_group": group_totals,
             "by_source": by_source,
             "duplicates": duplicates,
             "cross_listed": max(0, sum(by_module.values()) - total),
@@ -1339,17 +1706,19 @@ class Database:
             "site_tags": site_tags,
         }
         with self._stats_lock:
-            self._stats_cache = (now_mono, copy.deepcopy(result))
+            self._stats_cache[cache_key] = (now_mono, copy.deepcopy(result))
         return result
 
     def create_scan_run(self, modules: list[str], details: bool, max_pages: int | None,
-                        refresh: bool, resumed_from: int = 0) -> int:
+                        refresh: bool, resumed_from: int = 0, tab: str = "") -> int:
         options = {
             "modules": modules,
             "details": bool(details),
             "max_pages": max_pages,
             "refresh": bool(refresh),
         }
+        if tab:
+            options["tab"] = str(tab)
         cur = self.execute(
             """INSERT INTO scan_runs(module,state,message,options_json,resumed_from,started_at)
                VALUES(?,?,?,?,?,?)""",
@@ -1372,7 +1741,7 @@ class Database:
             (now_str(),),
         )
 
-    def list_scan_runs(self, limit: int = 50) -> list[dict]:
+    def list_scan_runs(self, limit: int = 50, group: str = "") -> list[dict]:
         rows = self.query("SELECT * FROM scan_runs ORDER BY id DESC LIMIT ?", (int(limit),))
         out = []
         for row in rows:
@@ -1382,6 +1751,12 @@ class Database:
             except Exception:
                 item["options"] = {}
             out.append(item)
+        if group:
+            allowed = set(modules_in_group(group))
+            out = [
+                item for item in out
+                if allowed & set((item.get("options") or {}).get("modules") or [])
+            ]
         return out
 
     def get_scan_run(self, run_id: int) -> dict | None:
@@ -1390,10 +1765,11 @@ class Database:
                 return item
         return None
 
-    def recent_activity(self, limit: int = 20) -> list[dict]:
+    def recent_activity(self, limit: int = 20, group: str = "") -> list[dict]:
+        table = self._scope_table(group)
         rows = self.query(
-            """SELECT e.downloaded_at, e.ep, e.file_size, d.id AS drama_id, d.title, d.site_id, d.module
-               FROM episodes e JOIN dramas d ON d.id=e.drama_id
+            f"""SELECT e.downloaded_at, e.ep, e.file_size, d.id AS drama_id, d.title, d.site_id, d.module
+               FROM episodes e JOIN {table} d ON d.id=e.drama_id
                WHERE e.state='done' AND e.downloaded_at IS NOT NULL
                ORDER BY e.downloaded_at DESC LIMIT ?""",
             (limit,),

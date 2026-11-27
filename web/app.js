@@ -1,4 +1,4 @@
-﻿/* 黄果媒体库 · 前端（无构建依赖） */
+/* 黄果媒体库 · 前端（无构建依赖） */
 (() => {
   'use strict';
 
@@ -8,12 +8,20 @@
   const QUALITY_MBPS = { hevc: 2.36, h264: 8.3, '720p': 2.2 };
   const QUALITY_LABEL = { hevc: 'HEVC 原画', h264: 'H264 原画', '720p': '720P 压缩' };
 
-  const MODULES = [
-    { key: 'original', label: '原创', icon: '◆' },
-    { key: 'duanju', label: '短剧', icon: '▶' },
-    { key: 'manju', label: '漫剧', icon: '✦' },
-    { key: 'yeguo', label: '野果短剧', icon: '🍑' },
+  const DEFAULT_GROUPS = [
+    { key: 'duanju', label: '短剧', icon: '▶', desc: 'AI 短剧 / 漫剧 / 原创' },
+    { key: 'film', label: '欧美影视', icon: '▷', desc: '博主 / 创作者影片，按演员订阅采集' },
   ];
+  const DEFAULT_MODULES = [
+    { key: 'original', label: '原创', icon: '◆', group: 'duanju', desc: '黄果原创', media_type: 'tv' },
+    { key: 'duanju', label: '短剧', icon: '▶', group: 'duanju', desc: 'AI 短剧', media_type: 'tv' },
+    { key: 'manju', label: '漫剧', icon: '✦', group: 'duanju', desc: 'AI 漫剧', media_type: 'tv' },
+    { key: 'yeguo', label: '野果短剧', icon: '🍑', group: 'duanju', desc: 'yeguodj.com', media_type: 'tv' },
+    { key: 'ph_creator', label: '博主影片', icon: '▷', group: 'film', desc: '按演员订阅采集博主影片', media_type: 'movie' },
+  ];
+  // 启动时用 /api/modules 覆盖：后端注册新模块后前端无需改动。
+  let GROUPS = DEFAULT_GROUPS.slice();
+  let MODULES = DEFAULT_MODULES.slice();
   const STATUSES = [
     { key: 'all', label: '全部', cls: '' },
     { key: 'none', label: '未下载', cls: 'none' },
@@ -26,7 +34,8 @@
   ];
 
   const state = {
-    route: { name: 'library' },
+    route: { name: 'hub' },
+    group: localStorage.getItem('hg_group') || 'duanju',
     module: 'all',
     q: '',
     status: 'all',
@@ -56,6 +65,7 @@
     tasks: [],
     history: [],
     subscriptions: [],
+    creators: [],
     schedules: [],
     duplicates: [],
     dupSelected: new Set(),
@@ -123,6 +133,12 @@
     return data;
   }
 
+  // 所有按分区隔离的请求统一带上 group，避免切换分区后看到另一边的数据。
+  function gurl(path) {
+    const sep = path.includes('?') ? '&' : '?';
+    return `${path}${sep}group=${encodeURIComponent(state.group)}`;
+  }
+
   function toast(message, type = '') {
     const root = $('#toasts');
     const el = document.createElement('div');
@@ -148,6 +164,38 @@
     return (MODULES.find((m) => m.key === key) || {}).label || key;
   }
 
+  function moduleMediaType(key) {
+    const mod = MODULES.find((m) => m.key === key);
+    return mod && mod.media_type === 'movie' ? 'movie' : 'tv';
+  }
+
+  function groupMeta(key) {
+    return GROUPS.find((g) => g.key === key) || GROUPS[0];
+  }
+
+  function modulesOfGroup(key) {
+    return MODULES.filter((m) => m.group === (key || state.group));
+  }
+
+  function setGroup(key) {
+    const meta = groupMeta(key);
+    state.group = meta.key;
+    localStorage.setItem('hg_group', meta.key);
+    const allowed = new Set(modulesOfGroup(meta.key).map((m) => m.key));
+    if (state.module !== 'all' && !allowed.has(state.module)) state.module = 'all';
+    state.page = 1;
+    state.selected.clear();
+    state.filteredIds = [];
+    if ($('#module-list')) renderSidebar();
+  }
+
+  function enterGroup(key) {
+    setGroup(key);
+    updateBatchBar();
+    if (location.hash === '#/library') render();
+    else navigate('/library');
+  }
+
   function statusLabel(key) {
     return (STATUSES.find((s) => s.key === key) || {}).label || key;
   }
@@ -161,13 +209,14 @@
 
   // -------------------------------------------------------------- navigation
   function parseHash() {
-    const raw = (location.hash || '#/library').replace(/^#/, '');
+    const raw = (location.hash || '#/hub').replace(/^#/, '');
     const parts = raw.split('/').filter(Boolean);
-    if (!parts.length) return { name: 'library' };
+    if (!parts.length) return { name: 'hub' };
+    if (parts[0] === 'hub' || parts[0] === 'home') return { name: 'hub' };
     if (parts[0] === 'module' && parts[1]) return { name: 'module', module: parts[1] };
     if (parts[0] === 'drama' && parts[1]) return { name: 'drama', id: Number(parts[1]) };
-    if (['library', 'updates', 'downloads', 'tags', 'settings', 'subscriptions', 'schedules', 'duplicates', 'scans'].includes(parts[0])) return { name: parts[0] };
-    return { name: 'library' };
+    if (['library', 'updates', 'downloads', 'tags', 'settings', 'subscriptions', 'schedules', 'duplicates', 'scans', 'creators'].includes(parts[0])) return { name: parts[0] };
+    return { name: 'hub' };
   }
 
   function navigate(path) {
@@ -177,12 +226,14 @@
 
   function updateDocumentTitle() {
     const r = state.route;
-    if (r.name === 'drama') document.title = `${state.detail ? state.detail.title : '剧集详情'} · 黄果媒体库`;
+    if (r.name === 'hub') document.title = '导航 · 黄果媒体库';
+    else if (r.name === 'drama') document.title = `${state.detail ? state.detail.title : '剧集详情'} · 黄果媒体库`;
     else if (r.name === 'downloads') document.title = '下载队列 · 黄果媒体库';
     else if (r.name === 'updates') document.title = '更新提醒 · 黄果媒体库';
     else if (r.name === 'tags') document.title = '标签管理 · 黄果媒体库';
     else if (r.name === 'settings') document.title = '设置 · 黄果媒体库';
     else if (r.name === 'subscriptions') document.title = '订阅追更 · 黄果媒体库';
+    else if (r.name === 'creators') document.title = '演员订阅 · 黄果媒体库';
     else if (r.name === 'duplicates') document.title = '重复剧 · 黄果媒体库';
     else if (r.name === 'scans') document.title = '扫描历史 · 黄果媒体库';
     else if (r.name === 'schedules') document.title = '定时任务 · 黄果媒体库';
@@ -250,6 +301,8 @@
     $('#nav-tasks').textContent = activeTasks + queuedTasks;
     $('#nav-subs').textContent = s.subscriptions || 0;
     $('#nav-dups').textContent = s.duplicates || 0;
+    const creatorsCount = $('#nav-creators-count');
+    if (creatorsCount) creatorsCount.textContent = (state.creators || []).length || '';
     $$('.snav').forEach((link) => link.classList.toggle('on', link.dataset.nav === state.route.name));
 
     const used = s.storage_bytes || 0;
@@ -260,11 +313,12 @@
     const total = used + free;
     $('#storage-fill').style.width = total > 0 ? `${Math.min(100, (used / total) * 100).toFixed(2)}%` : '0%';
     $('#module-total').textContent = s.total || 0;
+    if ($('#group-name')) $('#group-name').textContent = groupMeta(state.group).label;
     $('#tag-total').textContent = ((state.tags || []).length + ((s.site_tags || []).length));
     if (state.health) {
       const ok = state.health.ffmpeg;
       $('#health-dot').style.background = ok ? 'var(--ok)' : 'var(--accent)';
-      $('#health-text').textContent = ok ? `v1.9.1 · ${state.health.workers || 0} 路下载` : 'ffmpeg 未就绪';
+      $('#health-text').textContent = ok ? `v${state.health.version || '1.11.1'} · ${state.health.workers || 0} 路下载` : 'ffmpeg 未就绪';
     }
   }
 
@@ -275,10 +329,14 @@
         <span class="dot"></span><span>${item.label}</span><i>${status[item.key] || 0}</i>
       </button>`).join('');
 
+    // 「演员订阅」只对欧美影视分区有意义
+    const creatorsNav = $('#nav-creators');
+    if (creatorsNav) creatorsNav.style.display = state.group === 'film' ? '' : 'none';
+
     const byModule = (state.stats && state.stats.by_module) || {};
     const cross = (state.stats && state.stats.cross_listed) || 0;
     const duplicates = (state.stats && state.stats.duplicates) || 0;
-    $('#module-list').innerHTML = MODULES.map((mod) => `
+    $('#module-list').innerHTML = modulesOfGroup(state.group).map((mod) => `
       <button class="smod ${state.module === mod.key ? 'on' : ''}" data-action="set-module" data-module="${mod.key}">
         <span class="ic">${mod.icon}</span><span>${mod.label}</span><i>${byModule[mod.key] || 0}</i>
       </button>`).join('') + (cross ? `<div class="side-note">跨模块 ${cross} 部同时收录</div>` : '') +
@@ -323,8 +381,17 @@
     wrap.innerHTML = rows.join('');
   }
 
+  // ------------------------------------------------------------------- data
+  async function loadModules() {
+    try {
+      const res = await api('/modules');
+      if (res.groups && res.groups.length) GROUPS = res.groups;
+      if (res.modules && res.modules.length) MODULES = res.modules;
+    } catch (_) {}
+  }
+
   async function loadStats() {
-    try { state.stats = await api('/stats'); } catch (_) {}
+    try { state.stats = await api(gurl('/stats')); } catch (_) {}
     updateHeader();
     if ($('#status-list') && !$('#status-list').children.length) renderSidebar();
     else renderTagList();
@@ -333,7 +400,7 @@
 
   async function loadTags() {
     try {
-      const res = await api('/tags');
+      const res = await api(gurl('/tags'));
       state.tags = res.tags || [];
       state.excludedTags = res.excluded || [];
     } catch (_) {}
@@ -342,13 +409,13 @@
   }
 
   async function loadHealth() {
-    try { state.health = await api('/health'); } catch (_) {}
+    try { state.health = await api(gurl('/health')); } catch (_) {}
     updateSidebarCounts();
   }
 
   async function refreshActivity() {
     try {
-      const data = await api('/activity');
+      const data = await api(gurl('/activity'));
       state.activity = data;
       state.stats = data.stats || state.stats;
       updateHeader();
@@ -406,7 +473,7 @@
         const msg = scan.state === 'done' ? '采集完成' : scan.state === 'error' ? '采集异常' : '采集已停止';
         toast(`${msg}：${scan.message || ''}`, scan.state === 'error' ? 'err' : 'ok');
         loadStats().then(() => {
-          if (['library', 'module', 'updates', 'subscriptions', 'schedules'].includes(state.route.name)) render();
+          if (['library', 'module', 'updates', 'subscriptions', 'schedules', 'creators'].includes(state.route.name)) render();
         });
       }
       state.lastScanState = scan ? scan.state : 'idle';
@@ -429,7 +496,45 @@
     }
   }
 
-  // ------------------------------------------------------------------ library
+  // --------------------------------------------------------------------- hub
+  async function renderHubView() {
+    let stats = state.stats || {};
+    try { stats = await api('/stats'); state.stats = stats; } catch (_) {}
+    const byGroup = stats.by_group || {};
+    const byModule = stats.by_module || {};
+    const cards = GROUPS.map((g) => {
+      const mods = modulesOfGroup(g.key);
+      const total = byGroup[g.key] || 0;
+      const isCurrent = state.group === g.key;
+      const modChips = mods.length
+        ? mods.map((m) => `<span class="hub-mod">${h(m.icon || '▶')} ${h(m.label)} <i>${byModule[m.key] || 0}</i></span>`).join('')
+        : '<span class="hub-mod muted">尚未接入模块</span>';
+      return `<div class="hub-card ${isCurrent ? 'is-current' : ''} ${total ? '' : 'is-empty'}">
+        <div class="hub-glyph">${h(g.icon || '▶')}</div>
+        <div class="hub-body">
+          <h2>${h(g.label)}<span class="hub-badge">${total} 部</span></h2>
+          <p>${h(g.desc || '')}</p>
+          <div class="hub-mods">${modChips}</div>
+          <div class="hub-meta">${stats.last_scraped_at ? `最近采集 ${shortTime(stats.last_scraped_at)}` : '尚未采集'}</div>
+        </div>
+        <div class="hub-acts"><button class="btn ${isCurrent ? '' : 'pri'}" data-action="enter-group" data-group="${h(g.key)}">${isCurrent ? '当前分区' : '进入'}</button></div>
+      </div>`;
+    }).join('');
+    $('#view').innerHTML = `<div class="hub">
+      <div class="hub-head">
+        <h1>黄果媒体库</h1>
+        <p>按分区管理不同类型的站点内容：短剧（黄果 / 野果）与欧美影视（演员订阅）。媒体库、设置与下载目录按分区互相独立。</p>
+      </div>
+      <div class="hub-grid">${cards}</div>
+      <div class="hub-foot">
+        <a class="btn sm" href="#/settings">分区设置</a>
+        <a class="btn sm ghost" href="#/library">直接进媒体库</a>
+        <span class="hub-hint">切换分区可随时点侧栏左下角的「切换分区」。</span>
+      </div>
+    </div>`;
+  }
+
+  // ----------------------------------------------------------------- library
   async function loadLibrary() {
     const token = ++renderToken;
     const view = $('#view');
@@ -448,7 +553,7 @@
       year: String(state.year || 0),
     });
     try {
-      const data = await api('/dramas?' + params.toString());
+      const data = await api(gurl('/dramas?' + params.toString()));
       if (token !== renderToken) return;
       state.items = data.items || [];
       state.total = data.total || 0;
@@ -473,6 +578,22 @@
   }
 
   function onboardingHTML() {
+    if (state.group === 'film') {
+      return `<div class="onboarding">
+        <div class="onb-glyph">▷</div>
+        <h3>接入欧美影视</h3>
+        <p>三步开始采集博主影片：</p>
+        <ol>
+          <li><b>填写站点地址</b>：设置 → 欧美影视站点，填站点根地址并测试连通。</li>
+          <li><b>添加演员订阅</b>：粘贴博主页地址，自动抓取博主头像与名称。</li>
+          <li><b>采集</b>：演员订阅里点「立即采集」，新影片自动下载并刮削为 Emby 电影。</li>
+        </ol>
+        <div class="onb-actions">
+          <a class="btn pri" href="#/settings">填写站点地址</a>
+          <button class="btn" data-action="creator-add">＋ 添加博主</button>
+        </div>
+      </div>`;
+    }
     return `<div class="onboarding">
       <div class="onb-glyph">▦</div>
       <h3>先把媒体库扫进来</h3>
@@ -662,7 +783,7 @@
       score_min: String(state.scoreMin || 0), year: String(state.year || 0),
     });
     try {
-      const res = await api('/drama-ids?' + params.toString());
+      const res = await api(gurl('/drama-ids?' + params.toString()));
       const ids = (res.ids || []).map(Number);
       if (!ids.length) { toast('当前筛选没有剧集', 'err'); return; }
       if (ids.length > 200 && !confirm(`当前筛选共 ${ids.length} 部，确定全部选中？后续批量操作会作用于全部。`)) return;
@@ -724,6 +845,7 @@
         <div class="detail-info">
           <div class="detail-kicker">
             <span class="pill">${h(d.status_text || (total ? `更新至 ${total} 集` : '待同步'))}</span>
+            ${moduleMediaType(d.module) === 'movie' ? '<span class="pill">电影</span>' : ''}
             ${d.premiered ? `<span class="pill">上线 ${h(d.premiered)}</span>` : ''}
             <span class="pill ${done >= total && total ? 'ok' : ''}">已下载 ${done} / ${total || '?'}</span>
             ${d.has_update ? '<span class="pill warn">有更新</span>' : ''}
@@ -733,19 +855,28 @@
             <h1 class="detail-title">${h(d.title)}</h1>
             <button class="detail-fav ${d.favorite ? 'on' : ''}" data-action="detail-fav" title="${d.favorite ? '取消收藏' : '收藏'}">★</button>
           </div>
+          ${d.title_translated && d.title_original ? `<div class="detail-orig">原文：${h(d.title_original)} <button class="linkbtn" data-action="translate-drama">重新翻译</button></div>` : `<div class="detail-orig"><button class="linkbtn" data-action="translate-drama">翻译标题</button></div>`}
           <div class="detail-meta-line">
             <span>评分 <b>${d.score ? Number(d.score).toFixed(1) : '—'}</b></span>
             <span>播放 <b>${h(d.views || '—')}</b></span>
             <span>单集 <b>${h(d.duration_text || '—')}</b></span>
             <span>年份 <b>${year || '—'}</b></span>
-            <span>出品 <b>${h(d.author || (d.source === 'yeguo' ? '野果短剧' : '黄果短剧'))}</b></span>
+            <span>出品 <b>${h(d.author || (d.source === 'yeguo' ? '野果短剧' : d.source === 'ph' ? (d.creator_key || d.author || '博主') : '黄果短剧'))}</b></span>
           </div>
           <div class="detail-tags">
             ${siteTags.map((t) => `<span class="chip tag">${h(t)}</span>`).join('')}
             ${customTags.map((t) => `<span class="chip custom">${h(t.name)}<span class="x" data-action="detail-tag-remove" data-name="${h(t.name)}">×</span></span>`).join('')}
             <span class="chip add" data-action="detail-tag-add">＋ 标签</span>
           </div>
-          <div class="detail-plot clamped" id="detail-plot">${h(d.description || '暂无简介')}</div>
+          ${(d.actors || []).length ? `<div class="detail-actors">${(d.actors || []).map((a) => {
+            const file = String(a.thumb || '').replace(/\\/g, '/').split('/').pop();
+            const avatar = file ? `/avatars/${encodeURIComponent(file)}` : '';
+            return `<div class="actor-chip">
+              ${avatar ? `<img src="${h(avatar)}" alt="" loading="lazy" onerror="this.style.display='none'">` : '<span class="actor-fallback">☺</span>'}
+              <div class="actor-text"><b>${h(a.name)}</b>${a.role ? `<small>${h(a.role)}</small>` : ''}</div>
+            </div>`;
+          }).join('')}</div>` : ''}
+          <div class="detail-plot clamped" id="detail-plot">${h(d.description || (moduleMediaType(d.module) === 'movie' ? d.title : '') || '暂无简介')}</div>
           <button class="detail-plot-toggle" data-action="detail-plot">展开简介</button>
           <div class="detail-actions">
             <button class="btn pri" data-action="detail-download-all" ${complete ? 'disabled' : ''}>${complete ? '已下载完成' : (done > 0 ? `继续下载 · 缺 ${missing} 集` : `下载全集${total ? ` · ${total} 集` : ''}`)}</button>
@@ -780,7 +911,7 @@
           <div class="side-card">
             <div class="sc-label">媒体刮削</div>
             <div class="est-row"><span>NFO</span><b>自动写入</b></div>
-            <div class="est-row"><span>结构</span><b>电视剧</b></div>
+            <div class="est-row"><span>结构</span><b>${moduleMediaType(d.module) === 'movie' ? '电影' : '电视剧'}</b></div>
             <div class="sc-sub">Emby / Jellyfin 可直接识别</div>
             <button class="btn sm" data-action="detail-nfo" style="margin-top:9px">刷新 NFO</button>
           </div>
@@ -789,7 +920,7 @@
 
       <div class="ep-panel">
         <div class="ep-head">
-          <h2>分集 <small>${episodes.length} 集 · 已下载 ${done} 集 · 待下载 ${missing} 集${queuedCount ? ` · 排队 ${queuedCount}` : ''}${downloadingCount ? ` · 下载中 ${downloadingCount}` : ''}${failedCount ? ` · 失败 ${failedCount}` : ''}</small></h2>
+          <h2>${moduleMediaType(d.module) === 'movie' ? '正片' : '分集'} <small>${episodes.length} 集 · 已下载 ${done} 集 · 待下载 ${missing} 集${queuedCount ? ` · 排队 ${queuedCount}` : ''}${downloadingCount ? ` · 下载中 ${downloadingCount}` : ''}${failedCount ? ` · 失败 ${failedCount}` : ''}</small></h2>
           <div class="spacer"></div>
           <div class="ep-actions">
             <select class="select" id="detail-quality">
@@ -803,11 +934,11 @@
             <button class="btn sm pri" data-action="detail-download-selected">下载选中 <span id="ep-selected-count">0</span></button>
           </div>
         </div>
-        ${episodes.length ? `<div class="ep-grid" id="ep-grid">${episodes.map(epHTML).join('')}</div><div class="ep-foot">单击分集选中，双击直接观看</div>` : emptyHTML('还没有分集数据', '点击「同步详情」拉取分集列表。', '', '')}
+        ${episodes.length ? `<div class="ep-grid" id="ep-grid">${episodes.map(epHTML).join('')}</div><div class="ep-foot">单击分集选中，双击直接观看</div>` : emptyHTML('还没有视频数据', '点击「同步详情」拉取视频信息。', '', '')}
       </div>
 
       <div class="scrape-panel">
-        <div class="txt">已完成分集自动生成 <b>tvshow.nfo</b>、<b>poster.jpg</b>、<b>fanart.jpg</b> 与分集 NFO。<br>目录：<code>${h(d.folder)}</code></div>
+        <div class="txt">已完成分集自动生成 <b>${moduleMediaType(d.module) === 'movie' ? 'movie.nfo' : 'tvshow.nfo'}</b>、<b>poster.jpg</b>、<b>fanart.jpg</b> 与分集 NFO。<br>目录：<code>${h(d.folder)}</code></div>
         <div class="btns"><button class="btn sm" data-action="detail-nfo">刷新 NFO</button><button class="btn sm" data-action="detail-folder">打开文件夹</button></div>
       </div>`;
     updateEpSelection();
@@ -846,7 +977,7 @@
     const token = ++renderToken;
     $('#view').innerHTML = '<div class="skeleton" style="height:120px;border-radius:12px"></div>';
     try {
-      const [tasksRes, historyRes] = await Promise.all([api('/tasks?state=all&limit=400'), api('/history')]);
+      const [tasksRes, historyRes] = await Promise.all([api(gurl('/tasks?state=all&limit=400')), api(gurl('/history'))]);
       if (token !== renderToken) return;
       state.tasks = tasksRes.tasks || [];
       state.history = historyRes.items || [];
@@ -950,7 +1081,7 @@
     const token = ++renderToken;
     $('#view').innerHTML = '<div class="skeleton" style="height:120px;border-radius:12px"></div>';
     try {
-      const res = await api('/updates');
+      const res = await api(gurl('/updates'));
       if (token !== renderToken) return;
       const items = res.items || [];
       $('#view').innerHTML = `
@@ -984,7 +1115,7 @@
     const token = ++renderToken;
     $('#view').innerHTML = '<div class="skeleton" style="height:120px;border-radius:12px"></div>';
     try {
-      const res = await api('/subscriptions');
+      const res = await api(gurl('/subscriptions'));
       if (token !== renderToken) return;
       state.subscriptions = res.items || [];
       const updates = state.subscriptions.filter((i) => i.has_update).length;
@@ -1043,6 +1174,133 @@
     </div>`;
   }
 
+  // ----------------------------------------------------------------- creators
+  async function renderCreatorsView() {
+    const token = ++renderToken;
+    $('#view').innerHTML = '<div class="skeleton" style="height:120px;border-radius:12px"></div>';
+    try {
+      const res = await api(gurl('/creator-subs'));
+      if (token !== renderToken) return;
+      state.creators = res.items || [];
+      const enabled = state.creators.filter((c) => c.enabled).length;
+      const auto = state.creators.filter((c) => c.auto_download).length;
+      const videos = state.creators.reduce((sum, c) => sum + (c.videos || 0), 0);
+      const done = state.creators.reduce((sum, c) => sum + (c.done || 0), 0);
+      const baseOk = !!res.base;
+      $('#view').innerHTML = `
+        <div class="page-head"><h1>演员订阅</h1><p>订阅博主主页，扫描遍历全部翻页；新影片自动下载并刮削为 Emby 电影</p>
+          <div class="right">
+            <button class="btn sm" data-action="creator-download-all">下载全部未完成</button>
+            <button class="btn sm" data-action="open-scan">扫描全部博主</button>
+            <button class="btn pri" data-action="creator-add">＋ 添加博主</button>
+          </div></div>
+        <div class="creator-summary">
+          <div class="glyph">▷</div>
+          <div class="info">
+            <b>欧美影视站点 ${baseOk ? '已配置' : '未配置'} <span class="site-pill ${baseOk ? 'ok' : 'warn'}" style="margin-left:6px">${baseOk ? h(res.base) : '去设置页填写'}</span></b>
+            <span>订阅 <b style="display:inline;color:var(--text)">${state.creators.length}</b> 位博主（启用 ${enabled} · 自动下载 ${auto}） · 影片 <b style="display:inline;color:var(--text)">${videos}</b> 部 · 已下载 <b style="display:inline;color:var(--text)">${done}</b> 部</span>
+          </div>
+          <div class="right">
+            <button class="btn sm" data-action="site-check" data-source="ph">测试连接</button>
+            <a class="btn sm ghost" href="#/settings">站点设置</a>
+          </div>
+        </div>
+        ${state.creators.length ? `<div class="creator-grid">${state.creators.map(creatorCard).join('')}</div>`
+          : emptyHTML('还没有演员订阅', '粘贴博主页地址（model / channels / users 页面链接）订阅博主，头像与名称会自动抓取。', '添加博主', 'creator-add')}`;
+    } catch (err) {
+      if (token === renderToken) $('#view').innerHTML = emptyHTML('演员订阅加载失败', err.message, '重试', 'reload');
+    }
+  }
+
+  function creatorCard(item) {
+    const quality = item.quality || '';
+    const avatar = item.avatar
+      ? `<img class="creator-avatar" src="${h(item.avatar)}" alt="" onerror="this.style.display='none'">`
+      : `<div class="creator-avatar creator-avatar-empty">${h((item.name || '?').trim().charAt(0).toUpperCase())}</div>`;
+    const lastScan = item.last_scan_at
+      ? `上次采集 ${shortTime(item.last_scan_at)}${Number(item.last_new_count) ? ` · 新增 ${item.last_new_count} 部` : ''}`
+      : '尚未采集';
+    return `<div class="creator-card ${item.enabled ? '' : 'off'}">
+      <div class="creator-head">
+        ${avatar}
+        <div class="creator-id">
+          <div class="creator-name">${h(item.name || item.creator_key || '博主')}
+            ${item.enabled ? '' : '<span class="badge">已停用</span>'}
+            <span class="badge ${item.auto_download ? 'amber' : ''}">${item.auto_download ? '自动下载' : '仅采集'}</span>
+          </div>
+          <div class="creator-url" title="${h(item.page_url || '')}">${h(item.page_url || item.creator_key || '')}</div>
+        </div>
+      </div>
+      <div class="creator-stats">
+        <div class="creator-stat"><b>${item.videos || 0}</b><span>影片</span></div>
+        <div class="creator-stat ok"><b>${item.done || 0}</b><span>已下载</span></div>
+        <div class="creator-stat ${Number(item.downloading) ? 'accent' : ''}"><b>${item.downloading || 0}</b><span>下载中</span></div>
+        <div class="creator-stat"><b>${Number(item.max_pages) > 0 ? item.max_pages : '全部'}</b><span>采集页数</span></div>
+      </div>
+      <div class="creator-meta"><span>${h(lastScan)}</span></div>
+      <div class="creator-foot">
+        <select data-creator-quality data-id="${item.id}">
+          <option value="" ${!quality ? 'selected' : ''}>默认画质</option>
+          <option value="hevc" ${quality === 'hevc' ? 'selected' : ''}>HEVC 原画</option>
+          <option value="h264" ${quality === 'h264' ? 'selected' : ''}>H264 原画</option>
+          <option value="720p" ${quality === '720p' ? 'selected' : ''}>720P 压缩</option>
+        </select>
+        <label class="creator-auto"><input type="checkbox" data-creator-auto data-id="${item.id}" ${item.auto_download ? 'checked' : ''}> 自动下载新片</label>
+        <div class="creator-actions">
+          <button class="btn sm pri" data-action="creator-scan" data-id="${item.id}">立即采集</button>
+          <button class="btn sm" data-action="creator-refresh" data-id="${item.id}">刷新资料</button>
+          <button class="btn sm ghost" data-action="creator-toggle" data-id="${item.id}">${item.enabled ? '停用' : '启用'}</button>
+          <button class="btn sm ghost" data-action="creator-delete" data-id="${item.id}">删除</button>
+        </div>
+      </div>
+    </div>`;
+  }
+
+  function openCreatorAddModal() {
+    const modal = openModal(`
+      ${modalHead('添加演员订阅')}
+      <div class="mbody">
+        <div class="field"><label>博主页地址</label>
+          <input id="creator-url" type="text" placeholder="https://站点/model/用户名（或 /channels/…、/users/…）">
+          <div class="help">粘贴博主主页或视频列表页链接，名称与头像（#getAvatar）会自动抓取。</div>
+        </div>
+        <div class="field"><label>下载画质</label>
+          <select id="creator-quality">
+            <option value="">跟随分区默认</option>
+            <option value="hevc">HEVC 原画（取最高画质直链）</option>
+            <option value="h264">H264 原画</option>
+            <option value="720p">720P</option>
+          </select></div>
+        <div class="field"><label>采集页数上限（0 = 全部页）</label><input type="number" id="creator-pages" min="0" value="0"></div>
+        <label class="checkbox-line" style="margin-bottom:7px"><input type="checkbox" id="creator-auto" checked> 扫描发现新影片时自动下载</label>
+        <label class="checkbox-line"><input type="checkbox" id="creator-enabled" checked> 立即启用订阅</label>
+        <div class="scan-note" style="margin-top:12px">需要先到「设置 → 欧美影视站点」填写站点根地址。采集会遍历该博主全部翻页，每部影片单独刮削为 Emby 电影（标题自动翻译可用设置开关）。</div>
+      </div>
+      <div class="mfoot"><button class="btn ghost" data-close>取消</button><button class="btn pri" id="creator-save">添加订阅</button></div>
+    `);
+    modal.q('#creator-save').addEventListener('click', async () => {
+      const url = modal.q('#creator-url').value.trim();
+      if (!url) { toast('请填写博主页地址', 'err'); return; }
+      const payload = {
+        url,
+        quality: modal.q('#creator-quality').value,
+        max_pages: Number(modal.q('#creator-pages').value) || 0,
+        auto_download: modal.q('#creator-auto').checked,
+        enabled: modal.q('#creator-enabled').checked,
+      };
+      modal.q('#creator-save').disabled = true;
+      try {
+        const res = await api(gurl('/creator-subs'), { method: 'POST', body: payload });
+        modal.close();
+        toast(res.message || '已添加演员订阅', res.warning ? '' : 'ok');
+        renderCreatorsView();
+      } catch (err) {
+        toast(err.message, 'err');
+        modal.q('#creator-save').disabled = false;
+      }
+    });
+  }
+
   // ----------------------------------------------------------------- schedules
   const WEEKDAY_LABELS = ['一', '二', '三', '四', '五', '六', '日'];
 
@@ -1050,7 +1308,7 @@
     const token = ++renderToken;
     $('#view').innerHTML = '<div class="skeleton" style="height:120px;border-radius:12px"></div>';
     try {
-      const res = await api('/schedules');
+      const res = await api(gurl('/schedules'));
       if (token !== renderToken) return;
       state.schedules = res.items || [];
       const runningId = res.active_schedule_id;
@@ -1104,7 +1362,7 @@
     const editing = !!schedule;
     const current = schedule || {
       name: '每日全量扫库', time: '03:00', weekdays: [0, 1, 2, 3, 4, 5, 6],
-      modules: ['original', 'duanju', 'manju', 'yeguo'], details: 1, enabled: 1,
+      modules: modulesOfGroup(state.group).map((m) => m.key), details: 1, enabled: 1,
     };
     const days = new Set((current.weekdays || []).map(Number));
     const modules = new Set(current.modules || []);
@@ -1117,11 +1375,11 @@
           ${WEEKDAY_LABELS.map((label, i) => `<button class="gb ${days.has(i) ? 'on' : ''}" data-day="${i}">周${label}</button>`).join('')}
         </div></div>
         <div class="field"><label>采集模块</label><div class="scan-options">
-          ${MODULES.map((m) => `<label class="check-card"><input type="checkbox" class="sched-module" value="${m.key}" ${modules.has(m.key) ? 'checked' : ''}><span class="name">${m.label}</span></label>`).join('')}
+          ${modulesOfGroup(state.group).map((m) => `<label class="check-card"><input type="checkbox" class="sched-module" value="${m.key}" ${modules.has(m.key) ? 'checked' : ''}><span class="name">${m.label}</span></label>`).join('')}
         </div></div>
         <label class="checkbox-line" style="margin-bottom:8px"><input type="checkbox" id="sched-details" ${current.details ? 'checked' : ''}> 同步详情与分集（自动下载必需）</label>
         <label class="checkbox-line"><input type="checkbox" id="sched-enabled" ${current.enabled ? 'checked' : ''}> 创建后立即启用</label>
-        <div class="scan-note" style="margin-top:12px">定时任务执行的是全量扫库（最新 + 热播 + 精选），会按订阅设置自动下载新集。</div>
+        <div class="scan-note" style="margin-top:12px">定时任务执行的是全量扫库（最新 + 热播 + 精选 / 演员订阅），会按订阅设置自动下载新集。</div>
       </div>
       <div class="mfoot"><button class="btn ghost" data-close>取消</button><button class="btn pri" id="sched-save">保存</button></div>
     `, { wide: true });
@@ -1134,7 +1392,7 @@
       if (!selectedDays.length) { toast('至少选择一天', 'err'); return; }
       if (!selectedModules.length) { toast('至少选择一个模块', 'err'); return; }
       const payload = {
-        name, time, weekdays: selectedDays, modules: selectedModules,
+        name, time, weekdays: selectedDays, modules: selectedModules, group: state.group,
         details: modal.q('#sched-details').checked,
         enabled: modal.q('#sched-enabled').checked,
       };
@@ -1148,12 +1406,12 @@
     });
   }
 
-  // --------------------------------------------------------------------- tags
+  // --------------------------------------------------------------------- scans
   async function renderScansView() {
     const token = ++renderToken;
     $('#view').innerHTML = '<div class="skeleton" style="height:120px;border-radius:12px"></div>';
     try {
-      const res = await api('/scans?limit=60');
+      const res = await api(gurl('/scans?limit=60'));
       if (token !== renderToken) return;
       state.scanRuns = res.items || [];
       $('#view').innerHTML = `
@@ -1184,6 +1442,7 @@
     }
   }
 
+  // ---------------------------------------------------------------- duplicates
   function syncDupSelection() {
     const count = state.dupSelected.size;
     const label = $('#dup-selected-count');
@@ -1206,7 +1465,7 @@
     const token = ++renderToken;
     $('#view').innerHTML = '<div class="skeleton" style="height:120px;border-radius:12px"></div>';
     try {
-      const res = await api('/duplicates');
+      const res = await api(gurl('/duplicates'));
       if (token !== renderToken) return;
       state.duplicates = res.groups || [];
       const existingIds = new Set(state.duplicates.flatMap((g) => g.items.map((i) => i.id)));
@@ -1258,6 +1517,7 @@
     }
   }
 
+  // --------------------------------------------------------------------- tags
   async function renderTagsView() {
     await loadTags();
     const tags = state.tags || [];
@@ -1322,23 +1582,50 @@
   // ----------------------------------------------------------------- settings
   async function renderSettingsView() {
     await loadHealth();
-    try { state.settings = (await api('/settings')).settings || {}; } catch (_) {}
+    try { state.settings = (await api(gurl('/settings'))).settings || {}; } catch (_) {}
     const s = state.settings || {};
     const health = state.health || {};
+    const sitePanel = state.group === 'film' ? `
+      <div class="site-panel">
+        <h2><span class="site-glyph">▷</span>欧美影视站点
+          <span class="site-pill ${s.ph_base ? 'ok' : 'warn'}">${s.ph_base ? '已配置' : '未配置'}</span>
+        </h2>
+        <p class="hint">Pornhub 风格博主页站点：#getAvatar 头像、ul/li 视频卡、viewkey 详情页、mediaDefinitions 下载直链。保存后记得点「测试连接」。</p>
+        <div class="site-row">
+          <div class="fieldbox" style="flex:1;min-width:280px">
+            <label>站点根地址</label>
+            <input type="text" data-setting="ph_base" value="${h(s.ph_base || '')}" placeholder="https://www.pornhub.com">
+          </div>
+          <button class="btn" data-action="site-check" data-source="ph">测试连接</button>
+          <button class="btn ghost" data-action="open-creators">管理演员订阅</button>
+        </div>
+        <div class="site-row" style="margin-top:10px">
+          <div class="fieldbox">
+            <label>每位博主页数上限（0 = 全部）</label>
+            <input type="number" min="0" data-setting="ph_max_pages" value="${h(s.ph_max_pages || '0')}">
+          </div>
+          <div class="fieldbox" style="flex:1;min-width:200px">
+            <label>说明</label>
+            <div class="help" style="line-height:34px">视频多的博主可限制单次采集页数；单个博主还能在演员订阅里单独设置。</div>
+          </div>
+        </div>
+        <div class="site-check" id="ph-check-result"></div>
+      </div>` : '';
     $('#view').innerHTML = `
-      <div class="page-head"><h1>设置</h1><p>下载、刮削与网络</p></div>
+      <div class="page-head"><h1>设置</h1><p>${h(groupMeta(state.group).label)} · 下载、刮削与网络（仅作用于当前分区）</p></div>
+      ${sitePanel}
       <div class="settings-grid">
         <div class="panel">
           <h2>下载与刮削</h2>
-          <p class="hint">修改后对新任务生效；下载并发数重启程序后生效。</p>
+          <p class="hint">修改后对新任务生效；下载并发数重启程序后生效。这些设置按分区独立保存。</p>
           <div class="field"><label>下载根目录</label>
             <div style="display:flex;gap:7px">
               <input type="text" data-setting="download_root" id="setting-root" value="${h(s.download_root || '')}" style="flex:1">
               <button class="btn sm" data-action="browse-path">浏览</button>
               <button class="btn sm" data-action="check-path">检测</button>
             </div>
-            <div class="help" id="path-check">Jellyfin 建议把 原创 / 短剧 / 漫剧 三个子目录分别添加为「电视剧」媒体库。</div>
-            <div class="help">也可用环境变量 <code>HUANGGUO_DOWNLOAD_ROOT</code> 指定默认下载目录（Docker 挂载时用）。</div>
+            <div class="help" id="path-check">按分区独立设置下载目录：不同分区可以指向不同磁盘，分别加入 Jellyfin 媒体库。</div>
+            <div class="help">未单独设置时沿用全局默认；也可用环境变量 <code>HUANGGUO_DOWNLOAD_ROOT</code> 指定默认目录（Docker 挂载时用）。</div>
           </div>
           <div class="field"><label>目录模板</label><input type="text" data-setting="folder_template" value="${h(s.folder_template || '{module}/{title} ({year})')}">
             <div class="help">可用变量：{module} {title} {year} {site_id}。修改后只影响新下载。</div>
@@ -1365,6 +1652,15 @@
             <div class="switch-row"><div><div class="label">写入 NFO</div><div class="desc">tvshow.nfo 与分集 nfo</div></div><button class="switch ${s.write_nfo === '1' ? 'on' : ''}" data-switch="write_nfo"></button></div>
             <div class="switch-row"><div><div class="label">生成 fanart</div><div class="desc">模糊背景图 16:9</div></div><button class="switch ${s.write_fanart === '1' ? 'on' : ''}" data-switch="write_fanart"></button></div>
             <div class="switch-row"><div><div class="label">完成后打「已下载」</div><div class="desc">全集完成时自动</div></div><button class="switch ${s.auto_tag_done === '1' ? 'on' : ''}" data-switch="auto_tag_done"></button></div>
+            <div class="switch-row"><div><div class="label">翻译英文标题</div><div class="desc">免费 Google 翻译，只影响展示与 NFO</div></div><button class="switch ${s.translate_titles === '1' ? 'on' : ''}" data-switch="translate_titles"></button></div>
+            <div class="field" style="margin-top:10px"><label>翻译目标语言</label>
+              <select data-setting="translate_target">
+                <option value="zh-CN" ${s.translate_target !== 'zh-TW' ? 'selected' : ''}>简体中文（zh-CN）</option>
+                <option value="zh-TW" ${s.translate_target === 'zh-TW' ? 'selected' : ''}>繁體中文（zh-TW）</option>
+              </select>
+              <div class="help">译名写入 NFO 的 &lt;title&gt;，&lt;originaltitle&gt; 保留站点原文。</div>
+            </div>
+            <button class="btn sm" data-action="translate-all">翻译全部标题</button>
           </div>
           <div class="panel">
             <h2>运行状态</h2>
@@ -1373,11 +1669,13 @@
               <div class="health-item"><span>下载线程</span><b>${health.workers || 0} 路</b></div>
               <div class="health-item"><span>磁盘剩余</span><b>${fmtBytes(health.disk_free || 0)}</b></div>
               <div class="health-item"><span>媒体库占用</span><b>${fmtBytes((state.stats && state.stats.storage_bytes) || 0)}</b></div>
-              <div class="health-item"><span>服务版本</span><b>${h(health.version || '1.9.1')}</b></div>
+              <div class="health-item"><span>服务版本</span><b>${h(health.version || '1.11.1')}</b></div>
             </div>
             <div style="display:flex;gap:6px;margin-top:10px">
-              <button class="btn sm" data-action="site-check" data-source="huangguo">测试黄果</button>
-              <button class="btn sm" data-action="site-check" data-source="yeguo">测试野果</button>
+              ${state.group === 'film'
+                ? '<span class="hint" style="align-self:center">欧美站连接测试在上方「欧美影视站点」面板</span>'
+                : `<button class="btn sm" data-action="site-check" data-source="huangguo">测试黄果</button>
+                   <button class="btn sm" data-action="site-check" data-source="yeguo">测试野果</button>`}
             </div>
             <div class="hint" id="site-check-result"></div>
           </div>
@@ -1462,7 +1760,7 @@
 
     async function load(path) {
       try {
-        data = await api('/fs/list?path=' + encodeURIComponent(path || ''));
+        data = await api(gurl('/fs/list?path=' + encodeURIComponent(path || '')));
         render();
       } catch (err) { toast(err.message, 'err'); }
     }
@@ -1500,31 +1798,65 @@
     load(input ? input.value : '');
   }
 
-  function openScanModal() {
+  async function openScanModal() {
+    const group = groupMeta(state.group);
+    const mods = modulesOfGroup(state.group);
+    if (!mods.length) {
+      toast(`「${group.label}」还没有接入站点，先注册一个模块`, 'err');
+      return;
+    }
+    const isFilm = state.group === 'film';
+    const byModule = (state.stats && state.stats.by_module) || {};
+    let creators = (state.creators || []).filter((c) => c.enabled);
+    if (isFilm && !(state.creators || []).length) {
+      try {
+        const res = await api(gurl('/creator-subs'));
+        state.creators = res.items || [];
+        creators = state.creators.filter((c) => c.enabled);
+      } catch (_) {}
+    }
+    const moduleCards = mods.map((m) => `
+      <label class="check-card"><input type="checkbox" value="${m.key}" class="scan-module" checked>
+        <span class="ic">${h(m.icon || '▶')}</span><span class="name">${h(m.label)}</span>
+        <span class="desc">${byModule[m.key] || 0} 部</span></label>`).join('');
+    const head = isFilm
+      ? `<div class="scan-head">
+          <div class="glyph">▷</div>
+          <div class="tt"><b>${h(group.label)}</b><span>${creators.length ? `将采集 ${creators.length} 位启用的博主` : '还没有启用的博主'}</span></div>
+          <span class="scan-pill ${creators.length ? '' : 'warn'}">${creators.length ? '按演员订阅采集' : '先添加博主'}</span>
+        </div>`
+      : `<div class="scan-head">
+          <div class="glyph">▶</div>
+          <div class="tt"><b>${h(group.label)}</b><span>将采集 ${mods.length} 个模块的站点列表</span></div>
+          <span class="scan-pill">按模块列表采集</span>
+        </div>`;
+    const note = isFilm
+      ? `${creators.length
+          ? '每个启用的博主会遍历其全部翻页（受页数上限约束），新影片自动入库；订阅开了自动下载的直接加入队列，影片单独刮削为 Emby 电影。'
+          : '欧美影视按「演员订阅」采集：先到「演员订阅」添加博主（粘贴博主页地址），再回来开始采集。'}`
+      : '黄果每个模块扫「最近更新 / 当前热播 / 精选推荐」，野果扫探索列表（约 75 页 / 1500 部）。同名剧只保留集数最多的版本。首次全量约 5–12 分钟。';
     const modal = openModal(`
       ${modalHead('采集站点内容')}
       <div class="mbody">
-        <div class="scan-options">
-          <label class="check-card"><input type="checkbox" value="original" class="scan-module" checked><span class="name">原创</span><span class="desc">黄果原创</span></label>
-          <label class="check-card"><input type="checkbox" value="duanju" class="scan-module" checked><span class="name">短剧</span><span class="desc">AI 短剧</span></label>
-          <label class="check-card"><input type="checkbox" value="manju" class="scan-module" checked><span class="name">漫剧</span><span class="desc">AI 漫剧</span></label>
-          <label class="check-card"><input type="checkbox" value="yeguo" class="scan-module" checked><span class="name">野果短剧</span><span class="desc">yeguodj.com</span></label>
-        </div>
+        ${head}
+        <div class="scan-options">${moduleCards}</div>
         <div class="field"><label>采集页数（留空 = 全部）</label><input type="number" id="scan-pages" min="1" placeholder="例如 3，只采前 3 页"></div>
         <label class="checkbox-line" style="margin-bottom:7px"><input type="checkbox" id="scan-details" checked> 同步每部剧的详情与分集（下载必需）</label>
         <label class="checkbox-line" style="margin-bottom:12px"><input type="checkbox" id="scan-refresh"> 强制刷新已有详情</label>
-        <div class="scan-note">黄果每个模块扫「最近更新 / 当前热播 / 精选推荐」，野果扫探索列表（约 75 页 / 1500 部）。同名剧只保留集数最多的版本。首次全量约 5–12 分钟。</div>
+        <div class="scan-note">${note}</div>
       </div>
-      <div class="mfoot"><button class="btn ghost" data-close>取消</button><button class="btn pri" id="scan-start">开始采集</button></div>
+      <div class="mfoot">${isFilm && !creators.length ? '<button class="btn pri" data-action="creator-add">去添加博主</button><button class="btn ghost" data-close>取消</button>' : '<button class="btn ghost" data-close>取消</button><button class="btn pri" id="scan-start">开始采集</button>'}</div>
     `);
-    modal.q('#scan-start').addEventListener('click', async () => {
+    const startBtn = modal.q('#scan-start');
+    if (!startBtn) return;
+    startBtn.addEventListener('click', async () => {
       const modules = $$('.scan-module', modal.mask).filter((el) => el.checked).map((el) => el.value);
       if (!modules.length) { toast('至少选择一个模块', 'err'); return; }
       const pages = modal.q('#scan-pages').value.trim();
-      modal.q('#scan-start').disabled = true;
+      startBtn.disabled = true;
       try {
         const res = await api('/scan', { method: 'POST', body: {
-          modules, pages: pages ? Number(pages) : null,
+          modules, group: state.group, pages: pages ? Number(pages) : null,
           details: modal.q('#scan-details').checked,
           refresh: modal.q('#scan-refresh').checked,
         } });
@@ -1533,7 +1865,7 @@
         state.lastScanState = 'running';
         refreshActivity();
       } catch (err) {
-        modal.q('#scan-start').disabled = false;
+        startBtn.disabled = false;
         toast(err.message, 'err');
       }
     });
@@ -1556,7 +1888,7 @@
         <div class="fbody">
           <div class="fgroup"><div class="gh">模块</div><div class="fchips">
             <button class="gb ${draft.module === 'all' ? 'on' : ''}" data-fk="module" data-fv="all">全部 <i>${state.stats.total || 0}</i></button>
-            ${MODULES.map((m) => `<button class="gb ${draft.module === m.key ? 'on' : ''}" data-fk="module" data-fv="${m.key}">${m.label} <i>${byModule[m.key] || 0}</i></button>`).join('')}
+            ${modulesOfGroup(state.group).map((m) => `<button class="gb ${draft.module === m.key ? 'on' : ''}" data-fk="module" data-fv="${m.key}">${m.label} <i>${byModule[m.key] || 0}</i></button>`).join('')}
           </div></div>
           <div class="fgroup"><div class="gh">状态</div><div class="fchips">
             ${STATUSES.map((s) => `<button class="gb ${draft.status === s.key ? 'on' : ''}" data-fk="status" data-fv="${s.key}">${s.label} <i>${status[s.key] || 0}</i></button>`).join('')}
@@ -1637,7 +1969,7 @@
     if (mode === 'unsubscribe') {
       if (!confirm(`取消这 ${ids.length} 部剧的订阅？已下载文件不会删除。`)) return;
       try {
-        const res = await api('/dramas/batch', { method: 'POST', body: { ids, action: 'unsubscribe' } });
+        const res = await api('/dramas/batch', { method: 'POST', body: { ids, action: 'unsubscribe', group: state.group } });
         toast(res.message || '已取消订阅', 'ok');
         state.selected.clear();
         await loadStats();
@@ -1673,7 +2005,7 @@
         const res = await api('/dramas/batch', {
           method: 'POST',
           body: {
-            ids, action: 'subscribe', quality,
+            ids, action: 'subscribe', quality, group: state.group,
             auto_download: modal.q('#sub-auto').checked,
             download_now: modal.q('#sub-now').checked,
           },
@@ -1759,7 +2091,7 @@
         if (ids.length === 1) {
           res = await api(`/dramas/${ids[0]}/download`, { method: 'POST', body: { scope, eps, quality } });
         } else {
-          res = await api('/dramas/batch', { method: 'POST', body: { ids, action: scope === 'new' ? 'download_new' : 'download', quality } });
+          res = await api('/dramas/batch', { method: 'POST', body: { ids, action: scope === 'new' ? 'download_new' : 'download', quality, group: state.group } });
         }
         modal.close();
         toast(res.message || '已加入下载队列', 'ok');
@@ -1920,9 +2252,12 @@
     switch (action) {
       case 'open-scan': openScanModal(); break;
       case 'open-filter': openFilterModal(); break;
+      case 'open-hub': navigate('/hub'); break;
+      case 'enter-group': enterGroup(el.dataset.group); break;
+      case 'open-creators': navigate('/creators'); break;
       case 'cancel-scan': await api('/scan/cancel', { method: 'POST' }).catch(() => {}); refreshActivity(); break;
       case 'open-root': {
-        try { const res = await api('/open-root', { method: 'POST' }); toast(res.message || '已打开下载目录', 'ok'); }
+        try { const res = await api(gurl('/open-root'), { method: 'POST' }); toast(res.message || '已打开下载目录', 'ok'); }
         catch (err) { toast(err.message, 'err'); }
         break;
       }
@@ -2034,6 +2369,55 @@
         } catch (err) { toast(err.message, 'err'); }
         break;
       }
+      case 'creator-add':
+        openCreatorAddModal();
+        break;
+      case 'creator-scan': {
+        try {
+          const res = await api(gurl(`/creator-subs/${id}/scan`), { method: 'POST' });
+          toast(res.message || '开始采集', 'ok');
+          refreshActivity();
+        } catch (err) { toast(err.message, 'err'); }
+        break;
+      }
+      case 'creator-refresh': {
+        el.disabled = true;
+        try {
+          const res = await api(gurl(`/creator-subs/${id}/refresh`), { method: 'POST' });
+          toast(res.message || '已刷新', 'ok');
+          renderCreatorsView();
+        } catch (err) { toast(err.message, 'err'); }
+        finally { el.disabled = false; }
+        break;
+      }
+      case 'creator-toggle': {
+        const item = state.creators.find((c) => Number(c.id) === id);
+        try {
+          await api(gurl(`/creator-subs/${id}`), { method: 'PUT', body: { enabled: !(item && item.enabled) } });
+          toast(item && item.enabled ? '已停用订阅' : '已启用订阅', 'ok');
+          renderCreatorsView();
+        } catch (err) { toast(err.message, 'err'); }
+        break;
+      }
+      case 'creator-delete': {
+        const item = state.creators.find((c) => Number(c.id) === id);
+        if (!confirm(`删除「${(item && item.name) || '该博主'}」的订阅？已采集的影片不受影响。`)) break;
+        try {
+          await api(gurl(`/creator-subs/${id}`), { method: 'DELETE' });
+          toast('已删除演员订阅', 'ok');
+          renderCreatorsView();
+        } catch (err) { toast(err.message, 'err'); }
+        break;
+      }
+      case 'creator-download-all': {
+        el.disabled = true;
+        try {
+          const res = await api(gurl('/creator-subs/download'), { method: 'POST', body: { group: state.group } });
+          toast(res.message || '已加入队列', 'ok');
+        } catch (err) { toast(err.message, 'err'); }
+        finally { el.disabled = false; }
+        break;
+      }
       case 'dup-check': {
         if (el.checked) state.dupSelected.add(id);
         else state.dupSelected.delete(id);
@@ -2056,14 +2440,14 @@
       case 'dup-batch-unkeep':
       case 'dup-batch-subscribe':
       case 'dup-batch-download': {
-        const action = el.dataset.action.replace('dup-batch-', '');
+        const act = el.dataset.action.replace('dup-batch-', '');
         const ids = [...state.dupSelected];
         if (!ids.length) { toast('先勾选版本', 'err'); break; }
-        if (action === 'download' && !confirm(`下载选中的 ${ids.length} 个版本？已下载分集会跳过。`)) break;
+        if (act === 'download' && !confirm(`下载选中的 ${ids.length} 个版本？已下载分集会跳过。`)) break;
         try {
           const res = await api('/duplicates/batch', {
             method: 'POST',
-            body: { ids, action, quality: state.quality, auto_download: true },
+            body: { ids, action: act, quality: state.quality, auto_download: true, group: state.group },
           });
           state.duplicates = res.groups || [];
           state.dupSelected.clear();
@@ -2077,7 +2461,7 @@
       case 'dup-keep': {
         const keep = el.dataset.keep !== '0';
         try {
-          const res = await api(`/duplicates/${id}/keep`, { method: 'POST', body: { keep } });
+          const res = await api(`/duplicates/${id}/keep`, { method: 'POST', body: { keep, group: state.group } });
           state.duplicates = res.groups || [];
           toast(keep ? '已独立保留，会作为独立剧集出现' : '已取消独立', 'ok');
           await loadStats();
@@ -2089,7 +2473,7 @@
         try {
           const item = (state.duplicates || []).flatMap((g) => g.items).find((x) => Number(x.id) === id);
           if (item && item.is_duplicate) {
-            await api(`/duplicates/${id}/keep`, { method: 'POST', body: { keep: true } });
+            await api(`/duplicates/${id}/keep`, { method: 'POST', body: { keep: true, group: state.group } });
           }
           const res = await api(`/dramas/${id}/subscribe`, {
             method: 'POST',
@@ -2106,7 +2490,7 @@
         try {
           const item = (state.duplicates || []).flatMap((g) => g.items).find((x) => Number(x.id) === id);
           if (item && item.is_duplicate) {
-            await api(`/duplicates/${id}/keep`, { method: 'POST', body: { keep: true } });
+            await api(`/duplicates/${id}/keep`, { method: 'POST', body: { keep: true, group: state.group } });
           }
           const res = await api(`/dramas/${id}/download`, {
             method: 'POST',
@@ -2122,7 +2506,7 @@
       case 'dup-prefer': {
         if (!confirm('设为主版本？会合并重复版本的标签和收藏，已下载文件不会删除。')) break;
         try {
-          const res = await api(`/duplicates/${id}/prefer`, { method: 'POST', body: { merge_metadata: true } });
+          const res = await api(`/duplicates/${id}/prefer`, { method: 'POST', body: { merge_metadata: true, group: state.group } });
           state.duplicates = res.groups || [];
           toast(res.message || '已设为主版本', 'ok');
           await loadStats();
@@ -2132,7 +2516,7 @@
       }
       case 'dup-auto': {
         try {
-          const res = await api(`/duplicates/${id}/auto`, { method: 'POST' });
+          const res = await api(`/duplicates/${id}/auto`, { method: 'POST', body: { group: state.group } });
           state.duplicates = res.groups || [];
           toast(res.message || '已恢复自动选择', 'ok');
           await loadStats();
@@ -2142,7 +2526,7 @@
       }
       case 'batch-fav': {
         const value = Number(el.dataset.value ?? 1);
-        const res = await api('/dramas/batch', { method: 'POST', body: { ids: [...state.selected], action: 'favorite', value } }).catch((err) => ({ message: err.message }));
+        const res = await api('/dramas/batch', { method: 'POST', body: { ids: [...state.selected], action: 'favorite', value, group: state.group } }).catch((err) => ({ message: err.message }));
         toast(res.message || (value ? '已收藏' : '已取消收藏'), 'ok');
         await loadStats();
         render();
@@ -2199,7 +2583,7 @@
       }
       case 'detail-covers': {
         try {
-          const res = await api('/covers/backfill', { method: 'POST', body: { drama_ids: [state.detail.id] } });
+          const res = await api('/covers/backfill', { method: 'POST', body: { drama_ids: [state.detail.id], group: state.group } });
           toast(res.message || '开始补全集封面', 'ok');
           refreshActivity();
         } catch (err) { toast(err.message, 'err'); }
@@ -2209,7 +2593,7 @@
         const ids = [...state.selected];
         if (!ids.length) { toast('先选择剧集', 'err'); break; }
         try {
-          const res = await api('/covers/backfill', { method: 'POST', body: { drama_ids: ids } });
+          const res = await api('/covers/backfill', { method: 'POST', body: { drama_ids: ids, group: state.group } });
           toast(res.message || '开始补全集封面', 'ok');
           refreshActivity();
         } catch (err) { toast(err.message, 'err'); }
@@ -2218,7 +2602,7 @@
       case 'all-covers': {
         if (!confirm('为所有已下载分集补全封面？')) break;
         try {
-          const res = await api('/covers/backfill', { method: 'POST', body: { all: true } });
+          const res = await api('/covers/backfill', { method: 'POST', body: { all: true, group: state.group } });
           toast(res.message || '开始补全', 'ok');
           refreshActivity();
         } catch (err) { toast(err.message, 'err'); }
@@ -2241,6 +2625,29 @@
         const plot = $('#detail-plot');
         const clamped = plot.classList.toggle('clamped');
         el.textContent = clamped ? '展开简介' : '收起简介';
+        break;
+      }
+      case 'translate-all': {
+        el.disabled = true;
+        try {
+          const res = await api(gurl('/translate'), { method: 'POST', body: { group: state.group } });
+          toast(res.message || '翻译任务已开始', 'ok');
+        } catch (err) { toast(err.message, 'err'); }
+        finally { el.disabled = false; }
+        break;
+      }
+      case 'translate-drama': {
+        const dramaId = state.route.name === 'drama' ? state.detail.id : id;
+        el.disabled = true;
+        try {
+          const res = await api(`/dramas/${dramaId}/translate`, { method: 'POST' });
+          if (res.drama && state.route.name === 'drama' && state.detail && state.detail.id === dramaId) {
+            state.detail = res.drama;
+            renderDetailView();
+          }
+          toast(res.message || (res.title_zh ? `译名：${res.title_zh}` : '该标题无需翻译'), 'ok');
+        } catch (err) { toast(err.message, 'err'); }
+        finally { el.disabled = false; }
         break;
       }
       case 'ep-select-missing':
@@ -2271,7 +2678,7 @@
       case 'sub-download': openDownloadDialog([id], 'new'); break;
       case 'sub-download-all': {
         try {
-          const res = await api('/subscriptions/download', { method: 'POST', body: {} });
+          const res = await api(gurl('/subscriptions/download'), { method: 'POST', body: { group: state.group } });
           toast(res.message || '已加入队列', 'ok');
           refreshActivity();
         } catch (err) { toast(err.message, 'err'); }
@@ -2329,7 +2736,7 @@
         break;
       case 'retry-all-failed': {
         try {
-          const res = await api('/tasks/retry-failed', { method: 'POST' });
+          const res = await api(gurl('/tasks/retry-failed'), { method: 'POST' });
           toast(res.message || '已重新入队', 'ok');
           await renderDownloadsView();
         } catch (err) { toast(err.message, 'err'); }
@@ -2338,7 +2745,7 @@
       case 'clear-failed': {
         if (!confirm('清理所有失败任务记录？分集状态会保留，可重新下载。')) break;
         try {
-          await api('/tasks/clear', { method: 'POST', body: { states: ['failed'] } });
+          await api('/tasks/clear', { method: 'POST', body: { states: ['failed'], group: state.group } });
           toast('已清理失败记录', 'ok');
           await renderDownloadsView();
         } catch (err) { toast(err.message, 'err'); }
@@ -2378,7 +2785,7 @@
         break;
       }
       case 'tasks-clear':
-        await api('/tasks/clear', { method: 'POST' });
+        await api('/tasks/clear', { method: 'POST', body: { group: state.group } });
         toast('已清理任务记录', 'ok');
         renderDownloadsView();
         break;
@@ -2415,20 +2822,20 @@
         const name = $('#new-tag-name').value.trim();
         const color = $('#new-tag-color').value;
         if (!name) { toast('请输入标签名', 'err'); break; }
-        try { await api('/tags', { method: 'POST', body: { name, color } }); toast('标签已创建', 'ok'); renderTagsView(); }
+        try { await api(gurl('/tags'), { method: 'POST', body: { name, color, group: state.group } }); toast('标签已创建', 'ok'); renderTagsView(); }
         catch (err) { toast(err.message, 'err'); }
         break;
       }
       case 'tag-delete':
         if (!confirm('删除这个标签？不会删除剧集文件。')) break;
-        await api(`/tags/${id}`, { method: 'DELETE' });
+        await api(gurl(`/tags/${id}`), { method: 'DELETE' });
         renderTagsView();
         break;
       case 'settings-save': {
         const payload = {};
         $$('[data-setting]').forEach((input) => { payload[input.dataset.setting] = input.value; });
         $$('[data-switch]').forEach((btn) => { payload[btn.dataset.switch] = btn.classList.contains('on') ? '1' : '0'; });
-        try { await api('/settings', { method: 'PUT', body: payload }); toast('设置已保存', 'ok'); loadStats(); }
+        try { await api(gurl('/settings'), { method: 'PUT', body: payload }); toast('设置已保存', 'ok'); loadStats(); }
         catch (err) { toast(err.message, 'err'); }
         break;
       }
@@ -2453,14 +2860,20 @@
         el.disabled = true;
         const source = el.dataset.source || 'huangguo';
         const result = $('#site-check-result');
+        const phResult = $('#ph-check-result');
         if (result) result.textContent = '正在连接站点…';
+        if (phResult) { phResult.textContent = '正在连接站点…'; phResult.className = 'site-check'; }
         try {
-          const res = await api(`/site-check?source=${encodeURIComponent(source)}`);
-          if (result) result.textContent = res.message || `站点连接正常 · ${res.latency_ms}ms`;
+          const res = await api(gurl(`/site-check?source=${encodeURIComponent(source)}`));
+          const message = res.message || `站点连接正常 · ${res.latency_ms}ms`;
+          if (result) result.textContent = message;
+          if (phResult) { phResult.textContent = message; phResult.className = 'site-check ok'; }
           toast(res.message || '站点连接正常', 'ok');
         } catch (err) {
-          if (result) result.textContent = err.message;
-          toast(err.message, 'err');
+          const message = err.message;
+          if (result) result.textContent = message;
+          if (phResult) { phResult.textContent = message; phResult.className = 'site-check err'; }
+          toast(message, 'err');
         } finally {
           el.disabled = false;
         }
@@ -2504,7 +2917,7 @@
       localStorage.setItem('hg_quality', state.quality);
     } else if (event.target.matches('[data-sub-quality], [data-sub-auto]')) {
       const row = event.target.closest('.sub-row');
-      if (!row) return;
+      if (!row || row.classList.contains('creator-card')) return;
       const id = Number(event.target.dataset.id);
       const quality = row.querySelector('[data-sub-quality]').value;
       const auto = row.querySelector('[data-sub-auto]').checked;
@@ -2513,6 +2926,19 @@
           const item = state.subscriptions.find((i) => i.id === id);
           if (item) { item.sub_quality = quality; item.sub_auto = auto; }
           toast('订阅设置已保存', 'ok');
+        })
+        .catch((err) => toast(err.message, 'err'));
+    } else if (event.target.matches('[data-creator-quality], [data-creator-auto]')) {
+      const row = event.target.closest('.creator-card');
+      if (!row) return;
+      const id = Number(event.target.dataset.id);
+      const quality = row.querySelector('[data-creator-quality]').value;
+      const auto = row.querySelector('[data-creator-auto]').checked;
+      api(gurl(`/creator-subs/${id}`), { method: 'PUT', body: { quality, auto_download: auto } })
+        .then(() => {
+          const item = state.creators.find((i) => Number(i.id) === id);
+          if (item) { item.quality = quality; item.auto_download = auto; }
+          toast('演员订阅设置已保存', 'ok');
         })
         .catch((err) => toast(err.message, 'err'));
     }
@@ -2558,7 +2984,7 @@
   $('#btn-scan').addEventListener('click', openScanModal);
   $('#btn-filter').addEventListener('click', openFilterModal);
   $('#btn-open-root').addEventListener('click', async () => {
-    try { const res = await api('/open-root', { method: 'POST' }); toast(res.message || '已打开目录', 'ok'); }
+    try { const res = await api(gurl('/open-root'), { method: 'POST' }); toast(res.message || '已打开目录', 'ok'); }
     catch (err) { toast(err.message, 'err'); }
   });
   $('#scan-cancel').addEventListener('click', async () => {
@@ -2577,7 +3003,11 @@
 
   window.addEventListener('hashchange', () => {
     state.route = parseHash();
-    if (state.route.name === 'module') state.module = state.route.module;
+    if (state.route.name === 'module') {
+      const mod = MODULES.find((m) => m.key === state.route.module);
+      if (mod) setGroup(mod.group);
+      state.module = state.route.module;
+    }
     if (state.route.name === 'library') state.module = 'all';
     state.selected.clear();
     updateBatchBar();
@@ -2592,8 +3022,16 @@
     updateDocumentTitle();
     updateHeader();
     const r = state.route;
-    if (r.name === 'library' || r.name === 'module') {
-      if (r.name === 'module') state.module = r.module;
+    if (r.name === 'hub') {
+      renderSidebar();
+      await renderHubView();
+    } else if (r.name === 'library' || r.name === 'module') {
+      if (r.name === 'module') {
+        const mod = MODULES.find((m) => m.key === r.module);
+        if (mod) setGroup(mod.group);
+        state.module = r.module;
+      }
+      await loadStats();
       await loadLibrary();
     } else if (r.name === 'drama') {
       await loadDetail(r.id);
@@ -2605,6 +3043,8 @@
       await renderTagsView();
     } else if (r.name === 'subscriptions') {
       await renderSubscriptionsView();
+    } else if (r.name === 'creators') {
+      await renderCreatorsView();
     } else if (r.name === 'duplicates') {
       await renderDuplicatesView();
     } else if (r.name === 'schedules') {
@@ -2619,8 +3059,16 @@
   }
 
   async function boot() {
+    await loadModules();
+    // 支持 ?group=film 直接进入某个分区，也方便分享链接。
+    const urlGroup = new URLSearchParams(location.search).get('group');
+    if (urlGroup && GROUPS.some((g) => g.key === urlGroup)) setGroup(urlGroup);
     state.route = parseHash();
-    if (state.route.name === 'module') state.module = state.route.module;
+    if (state.route.name === 'module') {
+      const mod = MODULES.find((m) => m.key === state.route.module);
+      if (mod) setGroup(mod.group);
+      state.module = state.route.module;
+    }
     await Promise.all([loadStats(), loadTags(), loadHealth()]);
     renderSidebar();
     await render();
@@ -2630,5 +3078,3 @@
 
   boot();
 })();
-
-

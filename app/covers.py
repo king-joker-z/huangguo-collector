@@ -4,7 +4,9 @@ from __future__ import annotations
 import threading
 
 from . import nfo
+from .config import module_group
 from .db import Database, now_str
+from .groupctx import reset_group, set_group
 from .settings import Settings
 
 
@@ -33,11 +35,12 @@ class CoverBackfillManager:
         with self.lock:
             return dict(self.job)
 
-    def start(self, drama_ids: list[int] | None = None, force: bool = False) -> tuple[bool, str]:
+    def start(self, drama_ids: list[int] | None = None, force: bool = False,
+              group: str = "") -> tuple[bool, str]:
         with self.lock:
             if self.job.get("state") == "running":
                 return False, "封面补全任务正在进行中"
-            rows = self._collect(drama_ids)
+            rows = self._collect(drama_ids, group)
             self.job = self._idle()
             self.job.update(
                 {
@@ -53,10 +56,11 @@ class CoverBackfillManager:
             self.thread.start()
         return True, f"开始补全 {len(rows)} 集封面"
 
-    def _collect(self, drama_ids: list[int] | None) -> list[dict]:
+    def _collect(self, drama_ids: list[int] | None, group: str = "") -> list[dict]:
         params: list = []
-        sql = """SELECT e.drama_id,e.ep,e.file_path,e.duration,e.cover_path
-                 FROM episodes e WHERE e.state='done'"""
+        table = self.db.scope_table(group)
+        sql = f"""SELECT e.drama_id,e.ep,e.file_path,e.duration,e.cover_path
+                 FROM episodes e JOIN {table} d ON d.id=e.drama_id WHERE e.state='done'"""
         if drama_ids:
             sql += f" AND e.drama_id IN ({','.join('?' for _ in drama_ids)})"
             params.extend(drama_ids)
@@ -68,22 +72,27 @@ class CoverBackfillManager:
         try:
             for index, row in enumerate(rows, start=1):
                 drama = self.db.get_drama(int(row["drama_id"]))
-                episode = self.db.get_episode(int(row["drama_id"]), int(row["ep"]))
-                if not drama or not episode:
-                    failed += 1
-                else:
-                    try:
-                        target = nfo.generate_episode_thumb(
-                            self.settings, dict(drama), dict(episode), row.get("file_path")
-                        )
-                        if target:
-                            self.db.set_episode_cover(int(row["drama_id"]), int(row["ep"]), target)
-                            nfo.write_episode_nfo(self.settings, dict(drama), dict(episode))
-                            filled += 1
-                        else:
-                            failed += 1
-                    except Exception:
+                token = set_group(module_group(str(drama["module"] or ""))) if drama else None
+                try:
+                    episode = self.db.get_episode(int(row["drama_id"]), int(row["ep"]))
+                    if not drama or not episode:
                         failed += 1
+                    else:
+                        try:
+                            target = nfo.generate_episode_thumb(
+                                self.settings, dict(drama), dict(episode), row.get("file_path")
+                            )
+                            if target:
+                                self.db.set_episode_cover(int(row["drama_id"]), int(row["ep"]), target)
+                                nfo.write_episode_nfo(self.settings, dict(drama), dict(episode))
+                                filled += 1
+                            else:
+                                failed += 1
+                        except Exception:
+                            failed += 1
+                finally:
+                    if token is not None:
+                        reset_group(token)
                 with self.lock:
                     self.job.update(
                         done=index,

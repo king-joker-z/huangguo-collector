@@ -6,8 +6,10 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
-from .config import MODULES
+from .actors import ensure_avatars
+from .config import MODULES, module_group
 from .db import Database, now_str
+from .groupctx import reset_group, set_group
 from .scraper import Scraper, ScrapeError
 from .settings import Settings
 
@@ -26,7 +28,8 @@ TAB_VARIANTS = {
 
 
 class ScanManager:
-    def __init__(self, db: Database, settings: Settings, scrapers, downloads=None) -> None:
+    def __init__(self, db: Database, settings: Settings, scrapers, downloads=None,
+                 translator=None) -> None:
         self.db = db
         self.settings = settings
         if isinstance(scrapers, dict):
@@ -35,6 +38,7 @@ class ScanManager:
             self.scrapers = {"huangguo": scrapers}
         self.scraper = self.scrapers.get("huangguo")
         self.downloads = downloads
+        self.translator = translator
         self.lock = threading.RLock()
         self.cancel_event = threading.Event()
         self.thread: threading.Thread | None = None
@@ -69,7 +73,7 @@ class ScanManager:
             return data
 
     def start(self, modules: list[str], details: bool = True, max_pages: int | None = None,
-              refresh: bool = False, resumed_from: int = 0) -> tuple[bool, str]:
+              refresh: bool = False, resumed_from: int = 0, tab: str = "") -> tuple[bool, str]:
         modules = [m for m in modules if m in MODULES]
         if not modules:
             return False, "没有有效的模块"
@@ -91,7 +95,7 @@ class ScanManager:
                 }
             )
             self.thread = threading.Thread(
-                target=self._run, args=(modules, details, max_pages, refresh), name="scan", daemon=True
+                target=self._run, args=(modules, details, max_pages, refresh, tab), name="scan", daemon=True
             )
             self.thread.start()
         return True, "扫描已开始"
@@ -108,6 +112,7 @@ class ScanManager:
             max_pages=options.get("max_pages"),
             refresh=False,
             resumed_from=int(run_id),
+            tab=str(options.get("tab") or ""),
         )
 
     def cancel(self) -> None:
@@ -136,12 +141,15 @@ class ScanManager:
         if run_id:
             self.db.finish_scan_run(run_id, state, found, new_count, updated, message)
 
-    def _run(self, modules: list[str], details: bool, max_pages: int | None, refresh: bool) -> None:
+    def _run(self, modules: list[str], details: bool, max_pages: int | None,
+             refresh: bool, scan_tab: str = "") -> None:
         seen_detail_ids: set[int] = set()
+        token = None
         try:
             for module in modules:
                 if self.cancel_event.is_set():
                     break
+                token = set_group(module_group(module))
                 label = MODULES[module]["label"]
                 source = MODULES[module].get("source", "huangguo")
                 scraper = self.scrapers.get(source)
@@ -149,6 +157,16 @@ class ScanManager:
                     self._error(f"{label} 未配置采集器")
                     continue
                 tabs = TAB_VARIANTS.get(module, [("latest", "最近更新")])
+                # 适配器可以动态提供列表（欧美影视 = 演员订阅）
+                list_tabs = getattr(scraper, "list_tabs", None)
+                if callable(list_tabs):
+                    tabs = list_tabs(module) or []
+                if scan_tab:
+                    tabs = [(key, name) for key, name in tabs if key == scan_tab]
+                if not tabs:
+                    hint = "，先到「演员订阅」添加博主" if source == "ph" else ""
+                    self._error(f"{label} 没有可采集的列表{hint}")
+                    continue
                 self._update(module=module, module_label=label, message=f"读取「{label}」分页…")
                 tab_pages: list[tuple[str, str, int]] = []
                 try:
@@ -172,6 +190,7 @@ class ScanManager:
                 detail_ids: list[int] = []
                 done_pages = 0
                 for tab, tab_label, pages in tab_pages:
+                    tab_new = 0
                     for page in range(1, pages + 1):
                         if self.cancel_event.is_set():
                             break
@@ -195,6 +214,7 @@ class ScanManager:
                                 self.job["found"] += 1
                                 if is_new:
                                     self.job["new_count"] += 1
+                                    tab_new += 1
                                 if has_update:
                                     self.job["updated_count"] += 1
                             if details and (
@@ -207,6 +227,8 @@ class ScanManager:
                                 detail_ids.append(drama_id)
                         done_pages += 1
                         self._update(done_pages=done_pages)
+                    if not self.cancel_event.is_set():
+                        self._mark_tab_scanned(scraper, module, tab, tab_new)
                     if self.cancel_event.is_set():
                         break
 
@@ -217,7 +239,9 @@ class ScanManager:
                         detail_done=0,
                         message=f"「{label}」同步详情 0/{len(detail_ids)}",
                     )
-                    workers = max(1, min(12, self.settings.get_int("scan_workers", 6)))
+                    workers = max(1, min(12, self.settings.get_int(
+                        "scan_workers", 6, group=module_group(module)
+                    )))
                     for chunk in _chunks(detail_ids, 24):
                         if self.cancel_event.is_set():
                             break
@@ -251,6 +275,9 @@ class ScanManager:
         except Exception as exc:
             self._error(f"扫描异常: {exc}")
             self._finish("error", f"扫描异常: {exc}")
+        finally:
+            if token is not None:
+                reset_group(token)
 
     def _detail_one(self, drama_id: int, refresh: bool) -> None:
         row = self.db.get_drama(drama_id)
@@ -260,32 +287,76 @@ class ScanManager:
         scraper = self.scrapers.get(source) or self.scraper
         if scraper is None:
             raise RuntimeError(f"未配置站点采集器: {source}")
-        detail = scraper.fetch_detail(str(row["site_id"]))
-        _, has_update = self.db.apply_detail(str(row["site_id"]), detail)
-        if has_update:
-            with self.lock:
-                self.job["updated_count"] += 1
-        if refresh or not row["cover_path"]:
-            try:
-                scraper.save_cover(str(row["site_id"]), detail.get("cover_url") or "")
-            except Exception:
-                pass
-        self._auto_download(drama_id)
+        token = set_group(module_group(str(row["module"] or "")))
+        try:
+            detail = scraper.fetch_detail(str(row["site_id"]))
+            ensure_avatars(scraper, detail)
+            _, has_update = self.db.apply_detail(str(row["site_id"]), detail)
+            if has_update:
+                with self.lock:
+                    self.job["updated_count"] += 1
+            if refresh or not row["cover_path"]:
+                try:
+                    scraper.save_cover(str(row["site_id"]), detail.get("cover_url") or "")
+                except Exception:
+                    pass
+            if self.translator is not None:
+                self.translator.maybe_translate_drama(drama_id)
+            self._auto_download(drama_id)
+        finally:
+            reset_group(token)
+
+    def _mark_tab_scanned(self, scraper, module: str, tab: str, new_count: int) -> None:
+        """演员订阅的列表扫完后回写统计（影片数 / 上次扫描）。"""
+        creator_for_tab = getattr(scraper, "creator_for_tab", None)
+        if not callable(creator_for_tab) or not str(tab).startswith("sub:"):
+            return
+        try:
+            sub = creator_for_tab(tab)
+            if not sub:
+                return
+            stats = self.db.creator_video_stats(
+                str(sub.get("source") or "ph"), str(sub.get("creator_key") or "")
+            )
+            self.db.mark_creator_scanned(
+                int(sub["id"]), int(new_count), int(stats.get("videos") or 0)
+            )
+        except Exception as exc:
+            self._error(f"回写演员订阅统计失败 {tab}: {exc}")
 
     def _auto_download(self, drama_id: int) -> None:
         if self.downloads is None or self.cancel_event.is_set():
             return
         row = self.db.get_drama(drama_id)
-        if row and (int(row["is_duplicate"] or 0) or self.db.is_tag_excluded(drama_id)):
+        if not row:
             return
+        if int(row["is_duplicate"] or 0) or self.db.is_tag_excluded(drama_id):
+            return
+        drama_group = module_group(str(row["module"] or ""))
         subscription = self.db.get_subscription(drama_id)
-        if not subscription or not subscription["enabled"] or not subscription["auto_download"]:
+        if subscription and subscription["enabled"] and subscription["auto_download"]:
+            quality = subscription["quality"] or self.settings.get("quality", group=drama_group)
+            result = self.downloads.enqueue_new(drama_id, quality)
+            if result.get("queued"):
+                self.db.mark_subscription_auto(drama_id, result["queued"])
+                self._update(message=f"订阅自动下载：新增 {result['queued']} 集")
             return
-        quality = subscription["quality"] or self.settings.get("quality", "hevc")
+        # 欧美影视：演员订阅（博主）驱动自动下载
+        creator = self._creator_sub_for(row)
+        if not creator or not creator.get("enabled") or not creator.get("auto_download"):
+            return
+        quality = str(creator.get("quality") or "") or self.settings.get("quality", group=drama_group)
         result = self.downloads.enqueue_new(drama_id, quality)
         if result.get("queued"):
-            self.db.mark_subscription_auto(drama_id, result["queued"])
-            self._update(message=f"订阅自动下载：新增 {result['queued']} 集")
+            self.db.mark_creator_auto(int(creator["id"]), result["queued"])
+            self._update(message=f"演员订阅自动下载：新增 {result['queued']} 部")
+
+    def _creator_sub_for(self, row):
+        source = str(row["source"] or "")
+        creator_key = str(row["creator_key"] or "") if "creator_key" in row.keys() else ""
+        if not source or not creator_key:
+            return None
+        return self.db.get_creator_sub_by_key(source, creator_key)
 
     def auto_download(self, drama_id: int) -> None:
         self._auto_download(drama_id)

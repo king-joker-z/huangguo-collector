@@ -26,10 +26,12 @@ class SiteProvider(Protocol):
 def build_providers(db: Database, settings: Settings) -> dict[str, SiteProvider]:
     from .scraper import Scraper
     from .yeguo import YeguoScraper
+    from .adapters.ph import PhScraper
 
     return {
         "huangguo": Scraper(db, settings),
         "yeguo": YeguoScraper(db, settings),
+        "ph": PhScraper(db, settings),
     }
 
 
@@ -38,11 +40,17 @@ def provider_summary(providers: dict) -> list[dict]:
     for key, source in SOURCES.items():
         provider = providers.get(key)
         modules = [m for m, meta in MODULES.items() if meta.get("source", "huangguo") == key]
+        # 站点地址优先取运行时配置（欧美站的地址在设置页填写）
+        base = str(source.get("base") or "")
+        if provider is not None:
+            live_base = str(getattr(provider, "site_base", "") or "")
+            if live_base:
+                base = live_base
         out.append(
             {
                 "key": key,
                 "label": source["label"],
-                "base": source["base"],
+                "base": base,
                 "available": provider is not None,
                 "modules": modules,
             }

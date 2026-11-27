@@ -12,8 +12,9 @@ import time
 from pathlib import Path
 
 from . import nfo
-from .config import COVERS_DIR, SITE_BASE, TMP_DIR
+from .config import COVERS_DIR, SITE_BASE, TMP_DIR, module_group
 from .db import Database, now_str
+from .groupctx import reset_group, set_group
 from .scraper import ScrapeError, Scraper
 from .settings import Settings
 
@@ -27,6 +28,10 @@ class CanceledError(RuntimeError):
 
 
 class DownloadManager:
+    # 下载停滞看门狗：这么久没有新进度就杀掉 ffmpeg，走失败重试
+    # （重试会重新 get_playback，拿到新 token / 换到可用 CDN）。
+    STALL_KILL_SECONDS = 90
+
     def __init__(self, db: Database, settings: Settings, scrapers) -> None:
         self.db = db
         self.settings = settings
@@ -94,7 +99,8 @@ class DownloadManager:
         drama = self.db.get_drama(drama_id)
         if not drama:
             raise KeyError("剧集不存在")
-        quality = quality or self.settings.get("quality", "hevc")
+        drama_group = module_group(str(drama["module"] or ""))
+        quality = quality or self.settings.get("quality", group=drama_group)
         if quality not in QUALITY_LABEL:
             quality = "hevc"
         max_ep = max(int(drama["total_ep"] or 0), max(eps or [0]))
@@ -157,11 +163,19 @@ class DownloadManager:
         )
         return sum(1 for row in rows if self.cancel(int(row["id"])))
 
-    def retry_failed(self) -> dict:
+    def retry_failed(self, group: str = "") -> dict:
         """把所有 failed 任务重新入队，保留原任务画质。"""
-        rows = self.db.query(
-            "SELECT drama_id,ep,quality FROM tasks WHERE state='failed' ORDER BY id"
-        )
+        if group:
+            table = self.db.scope_table(group)
+            rows = self.db.query(
+                f"SELECT t.drama_id,t.ep,t.quality FROM tasks t "
+                f"JOIN {table} d ON d.id=t.drama_id "
+                "WHERE t.state='failed' ORDER BY t.id"
+            )
+        else:
+            rows = self.db.query(
+                "SELECT drama_id,ep,quality FROM tasks WHERE state='failed' ORDER BY id"
+            )
         queued = skipped = 0
         for row in rows:
             task_id = self.db.upsert_task(
@@ -204,8 +218,42 @@ class DownloadManager:
         if not task or task["state"] != "queued":
             return
         drama = self.db.get_drama(int(task["drama_id"]))
+        if not drama:
+            self.db.update_task(task_id, state="failed", error="剧集或分集不存在")
+            return
+        token = set_group(module_group(str(drama["module"] or "")))
+        try:
+            self._process_drama(task_id, task, drama)
+        finally:
+            reset_group(token)
+
+    # ------------------------------------------------------------------ helpers
+    def _probe_media_duration(self, path: Path) -> float:
+        """ffprobe 读媒体时长（秒），失败返回 0。"""
+        ffprobe = shutil.which("ffprobe")
+        if not ffprobe:
+            candidate = Path(str(self.ffmpeg)).parent / "ffprobe.exe"
+            ffprobe = str(candidate) if candidate.exists() else ""
+        if not ffprobe:
+            return 0.0
+        try:
+            proc = subprocess.run(
+                [
+                    ffprobe, "-v", "error",
+                    "-show_entries", "format=duration",
+                    "-of", "default=noprint_wrappers=1:nokey=1",
+                    str(path),
+                ],
+                capture_output=True, text=True, timeout=90,
+                creationflags=CREATE_NO_WINDOW if os.name == "nt" else 0,
+            )
+            return float(str(proc.stdout).strip())
+        except (ValueError, subprocess.SubprocessError, OSError):
+            return 0.0
+
+    def _process_drama(self, task_id: int, task, drama) -> None:
         episode = self.db.get_episode(int(task["drama_id"]), int(task["ep"]))
-        if not drama or not episode:
+        if not episode:
             self.db.update_task(task_id, state="failed", error="剧集或分集不存在")
             return
         if task_id in self.canceled:
@@ -289,8 +337,19 @@ class DownloadManager:
             raise ScrapeError(f"未配置站点采集器: {source}")
         payload = scraper.get_playback(str(drama["site_id"]), int(episode["ep"]))
         streams = payload.get("streams") or {}
+        # use_hevc 必须始终有值：后面 hvc1 tag 的判断要用（欧美的 mp4 直链没有 hevc 流，恒为 False）。
         use_hevc = quality == "hevc" and bool(streams.get("hevc"))
-        url = streams.get("hevc") if use_hevc else streams.get("main")
+        url = ""
+        # 适配器可实现 stream_url(payload, quality) 自定义画质选择
+        # （欧美影视：720p 优先 720 直链，hevc/h264 取最高画质 mp4）。
+        stream_url_fn = getattr(scraper, "stream_url", None)
+        if callable(stream_url_fn):
+            try:
+                url = str(stream_url_fn(payload, quality) or "")
+            except Exception:
+                url = ""
+        if not url:
+            url = streams.get("hevc") if use_hevc else streams.get("main")
         if not url:
             raise ScrapeError("没有可用的视频流")
         headers = scraper.cdn_headers(payload) if hasattr(scraper, "cdn_headers") else Scraper.cdn_headers(payload)
@@ -307,55 +366,115 @@ class DownloadManager:
             except OSError:
                 pass
 
+        # ------------------------------------------------------------------
+        # 分段流（欧美影视）：先逐片下载到本地缓存（断点续传，重试不浪费
+        # 流量；token 失效自动刷新续传），再让 ffmpeg 本地合并。所选流是
+        # HLS 且适配器实现了 download_stream 时启用。
+        local_input = False
+        seg_dir = TMP_DIR / f"{drama['site_id']}_{episode['ep']}_segs"
+        download_stream = getattr(scraper, "download_stream", None)
+        if callable(download_stream) and ".m3u8" in url:
+            seg_state = {"last_db": 0.0, "bytes": 0, "time": time.time()}
+
+            def seg_progress(done: int, total: int, bytes_done: int) -> None:
+                now = time.time()
+                if now - seg_state["last_db"] < 1.5:
+                    return
+                elapsed = max(0.001, now - seg_state["time"])
+                speed = max(0.0, (bytes_done - seg_state["bytes"]) / elapsed)
+                self.db.update_task(
+                    task_id,
+                    progress=round(min(99.0, done / max(1, total) * 100), 1),
+                    size=bytes_done,
+                    speed=round(speed, 0),
+                )
+                seg_state.update(last_db=now, bytes=bytes_done, time=now)
+
+            seg_info = download_stream(
+                payload, str(drama["site_id"]), int(episode["ep"]), quality,
+                seg_dir, progress=seg_progress,
+                should_cancel=lambda: task_id in self.canceled,
+            )
+            if seg_info.get("playlist"):
+                url = str(seg_info["playlist"])
+                local_input = True
+
         duration = int(episode.get("duration") or 0)
-        cmd = [
-            self.ffmpeg,
-            "-y",
-            "-hide_banner",
-            "-loglevel", "error",
-            "-progress", "pipe:1",
-            "-nostats",
-            "-headers", header_text,
-            "-rw_timeout", "120000000",
-            "-analyzeduration", "100M",
-            "-probesize", "100M",
-            "-i", url,
-            "-map", "0:v:0",
-        ]
-        if include_audio:
-            cmd += ["-map", "0:a:0?"]
-        if quality == "720p":
-            cmd += [
-                "-vf", "scale=-2:720",
-                "-c:v", "libx264",
-                "-preset", "veryfast",
-                "-crf", "23",
+        if local_input:
+            # 分段流自带目标画质（1080/720 原生变体），本地合并直接封装，
+            # 不再转码；也无需远程请求头/重连参数。
+            cmd = [
+                self.ffmpeg,
+                "-y",
+                "-hide_banner",
+                "-loglevel", "error",
+                "-progress", "pipe:1",
+                "-nostats",
+                "-analyzeduration", "100M",
+                "-probesize", "100M",
+                "-i", url,
+                "-map", "0:v:0",
             ]
             if include_audio:
-                cmd += ["-c:a", "aac", "-b:a", "128k"]
+                cmd += ["-map", "0:a:0?", "-c:a", "aac", "-b:a", "128k"]
             else:
                 cmd += ["-an"]
+            cmd += ["-c:v", "copy", "-movflags", "+faststart",
+                    "-max_muxing_queue_size", "2048", "-f", "mp4", str(tmp)]
         else:
-            if transcode_video:
-                # 某些 HLS 流的宽高/SPS 在 copy 时不可用，导致
-                # "dimensions not set / Could not write header"，转码可补齐参数。
+            cmd = [
+                self.ffmpeg,
+                "-y",
+                "-hide_banner",
+                "-loglevel", "error",
+                "-progress", "pipe:1",
+                "-nostats",
+                "-headers", header_text,
+                # 30 秒无数据即判死连接（默认 120s 太久，卡住的分片会拖住整个任务）
+                "-rw_timeout", "30000000",
+                # 分片连接被 CDN 掐断时自动重连
+                "-reconnect", "1",
+                "-reconnect_streamed", "1",
+                "-reconnect_delay_max", "5",
+                "-analyzeduration", "100M",
+                "-probesize", "100M",
+                "-i", url,
+                "-map", "0:v:0",
+            ]
+            if include_audio:
+                cmd += ["-map", "0:a:0?"]
+            if quality == "720p":
                 cmd += [
+                    "-vf", "scale=-2:720",
                     "-c:v", "libx264",
                     "-preset", "veryfast",
-                    "-crf", "20",
-                    "-pix_fmt", "yuv420p",
+                    "-crf", "23",
                 ]
+                if include_audio:
+                    cmd += ["-c:a", "aac", "-b:a", "128k"]
+                else:
+                    cmd += ["-an"]
             else:
-                # 视频原样复制；音频统一转 AAC，避开 ADTS/AAC 头不兼容导致
-                # aac_adtstoasc 在 MP4 封装时报 Invalid data。
-                cmd += ["-c:v", "copy"]
-            if include_audio:
-                cmd += ["-c:a", "aac", "-b:a", "128k"]
-            else:
-                cmd += ["-an"]
-            if use_hevc and not transcode_video:
-                cmd += ["-tag:v", "hvc1"]
-        cmd += ["-movflags", "+faststart", "-max_muxing_queue_size", "2048", "-f", "mp4", str(tmp)]
+                if transcode_video:
+                    # 某些 HLS 流的宽高/SPS 在 copy 时不可用，导致
+                    # "dimensions not set / Could not write header"，转码可补齐参数。
+                    cmd += [
+                        "-c:v", "libx264",
+                        "-preset", "veryfast",
+                        "-crf", "20",
+                        "-pix_fmt", "yuv420p",
+                    ]
+                else:
+                    # 视频原样复制；音频统一转 AAC，避开 ADTS/AAC 头不兼容导致
+                    # aac_adtstoasc 在 MP4 封装时报 Invalid data。
+                    cmd += ["-c:v", "copy"]
+                if include_audio:
+                    cmd += ["-c:a", "aac", "-b:a", "128k"]
+                else:
+                    cmd += ["-an"]
+                if use_hevc and not transcode_video:
+                    cmd += ["-tag:v", "hvc1"]
+            cmd += ["-movflags", "+faststart", "-max_muxing_queue_size", "2048", "-f", "mp4", str(tmp)]
 
         env = os.environ.copy()
         proxy = self.settings.get("proxy").strip()
@@ -383,6 +502,26 @@ class DownloadManager:
         )
         with self.lock:
             self.procs[task_id] = proc
+
+        # 停滞看门狗：HLS 分片连接被 CDN 挂住时 ffmpeg 不退出也不报错，
+        # 进度会冻住。90 秒无新进度直接杀掉进程，走正常失败重试
+        # （重试会重新 get_playback 拿新 token / 换可用 CDN）。
+        stall_state = {"last": time.time()}
+        stall_event = threading.Event()
+
+        def stall_watchdog():
+            while proc.poll() is None:
+                time.sleep(5)
+                if time.time() - stall_state["last"] > self.STALL_KILL_SECONDS:
+                    stall_event.set()
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                    return
+
+        watchdog = threading.Thread(target=stall_watchdog, name=f"stall-{task_id}", daemon=True)
+        watchdog.start()
         try:
             assert proc.stdout is not None
             for line in proc.stdout:
@@ -401,14 +540,18 @@ class DownloadManager:
                 key, _, value = line.partition("=")
                 if key == "total_size":
                     try:
-                        total_size = int(value)
+                        new_size = int(value)
                     except ValueError:
-                        pass
+                        continue
+                    if new_size != total_size:
+                        total_size = new_size
+                        stall_state["last"] = time.time()
                 elif key == "out_time_ms":
                     try:
                         seconds = int(value) / 1_000_000
                     except ValueError:
                         continue
+                    stall_state["last"] = time.time()
                     now = time.time()
                     if duration > 0:
                         progress = min(99.0, seconds / duration * 100)
@@ -434,12 +577,36 @@ class DownloadManager:
 
         if task_id in self.canceled:
             raise CanceledError()
+        if stall_event.is_set():
+            raise RuntimeError(
+                f"下载停滞超过 {self.STALL_KILL_SECONDS} 秒（CDN 分片连接挂起），已中断"
+            )
         if returncode != 0 or not tmp.exists() or tmp.stat().st_size < 1024:
             detail = " | ".join(error_lines[-4:]) or f"ffmpeg 退出码 {returncode}"
             raise RuntimeError(detail[:600])
 
+        # 时长校验：HLS 分片 token 中途失效时，ffmpeg 会静默跳过剩余分片
+        # 并正常退出（exit 0），产出被截断的"成功"文件。校验基线用
+        # 分段下载的播放列表总时长（流的地面真值）——站点解析的时长
+        # 可能抓到推荐位视频的数字，不能作为判据。
+        expected = int(episode.get("duration") or 0)
+        if local_input and seg_info.get("duration"):
+            stream_expected = int(float(seg_info["duration"]))
+            if stream_expected > 30:
+                expected = stream_expected
+        if expected > 30:
+            actual = self._probe_media_duration(tmp)
+            if actual and actual < expected * 0.9:
+                raise RuntimeError(
+                    f"下载不完整：文件仅 {actual:.0f} 秒 / 流 {expected} 秒"
+                    f"（分片中途失效，重试会换新地址）"
+                )
+
         size = tmp.stat().st_size
         os.replace(tmp, target)
+        # 下载成功：清理分片缓存（失败/取消时保留，供下次断点续传）
+        if local_input:
+            shutil.rmtree(seg_dir, ignore_errors=True)
         self.db.set_episode_state(
             int(drama["id"]), int(episode["ep"]), "done", str(target), size
         )
@@ -481,6 +648,10 @@ class DownloadManager:
             data["tags_site"] = json.loads(data.get("tags_json") or "[]")
         except Exception:
             data["tags_site"] = []
+        try:
+            data["actors"] = json.loads(data.get("actors_json") or "[]")
+        except Exception:
+            data["actors"] = []
         if not data.get("cover_path"):
             candidate = COVERS_DIR / f"{data.get('site_id')}.jpg"
             if candidate.exists():
@@ -488,18 +659,26 @@ class DownloadManager:
         return data
 
     # -------------------------------------------------------------------- status
-    def active(self) -> list[dict]:
-        return self.db.active_tasks()
+    def active(self, group: str = "") -> list[dict]:
+        return self.db.active_tasks(group=group)
 
-    def summary(self) -> dict:
-        row = self.db.query_one(
-            """SELECT
+    def summary(self, group: str = "") -> dict:
+        if group:
+            table = self.db.scope_table(group)
+            query = f"""SELECT
+                 SUM(CASE WHEN t.state='downloading' THEN 1 ELSE 0 END) AS downloading,
+                 SUM(CASE WHEN t.state='queued' THEN 1 ELSE 0 END) AS queued,
+                 SUM(CASE WHEN t.state='done' THEN 1 ELSE 0 END) AS done,
+                 SUM(CASE WHEN t.state='failed' THEN 1 ELSE 0 END) AS failed
+               FROM tasks t JOIN {table} d ON d.id=t.drama_id"""
+        else:
+            query = """SELECT
                  SUM(CASE WHEN state='downloading' THEN 1 ELSE 0 END) AS downloading,
                  SUM(CASE WHEN state='queued' THEN 1 ELSE 0 END) AS queued,
                  SUM(CASE WHEN state='done' THEN 1 ELSE 0 END) AS done,
                  SUM(CASE WHEN state='failed' THEN 1 ELSE 0 END) AS failed
                FROM tasks"""
-        )
+        row = self.db.query_one(query)
         return {
             "downloading": int(row["downloading"] or 0) if row else 0,
             "queued": int(row["queued"] or 0) if row else 0,

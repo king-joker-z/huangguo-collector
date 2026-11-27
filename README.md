@@ -1,23 +1,26 @@
 # 黄果采集器 · Huangguo Collector
 
-面向 `huangguoai.com`（黄果短剧）和 `yeguodj.com`（野果短剧）的本地采集 + 媒体库管理工具。黄果按原创 / 短剧 / 漫剧三个模块采集，野果按探索分类全量采集；两站同名剧自动保留集数更多的版本。提供：
+面向 `huangguoai.com`（黄果短剧）、`yeguodj.com`（野果短剧）与欧美影视博主页站点（Pornhub 风格，地址在设置页填写）的本地采集 + 媒体库管理工具。黄果按原创 / 短剧 / 漫剧三个模块采集，野果按探索分类全量采集；两站同名剧自动保留集数更多的版本；欧美影视按「演员订阅」采集博主的全部影片并刮削为 Emby 电影。提供：
 
 - 直观的 Web 媒体库（深色界面，卡片式浏览、搜索、筛选、分页）
+- 分区导航：短剧 / 欧美影视 双入口，媒体库、模块与采集入口互相独立，后续可继续加分区
+- **演员订阅（欧美影视）**：粘贴博主页地址即可订阅，头像 / 名称自动抓取，扫描遍历全部翻页，新影片自动下载
+- 标题翻译开关（免费 Google 翻译），并按 Emby 规范写入译名 / 原文 / 演员头像
 - 一键下载整部剧 / 只下载新增分集 / 分批下载
 - 批量订阅 / 取消订阅，批量忽略更新、补封面、同步详情、收藏
 - 后台下载队列（进度、速度、大小、取消、失败重试）
-- 自动生成 Emby / Jellyfin / Kodi 电视剧刮削结构（NFO + 海报 + fanart）
+- 自动生成 Emby / Jellyfin / Kodi 刮削结构（NFO + 海报 + fanart；欧美影视走电影结构）
 - 自动打「已下载」标签 + 自定义标签管理
 - 更新检测：重新扫描后标记「有更新」，直接补下新增分集
-- 双站点：黄果（原创/短剧/漫剧）+ 野果（探索分类）
+- 多站点：黄果（原创/短剧/漫剧）+ 野果（探索分类）+ 欧美站（博主影片）
 - 跨站点同名合并：同名剧只保留集数最多的一个版本，重复条目隐藏但文件不删除
 - 重复剧管理页：查看/手动指定主版本，合并标签收藏；同名不同内容可独立保留并分别订阅下载，支持多选批量操作
 - 全选当前筛选结果，批量订阅/下载/打标签
 - 扫描历史与中断继续，Provider 多站点架构
 - 标签排除：把题材/自建标签加入排除列表，相关剧集从媒体库、更新、订阅、统计中隐藏
 - 下载队列暂停/继续，当前集完成后不再开始新任务
-- 定时任务：每天/每周指定时间自动全量扫库（最新 + 热播 + 精选 / 野果探索）
-- 订阅追更：订阅的剧在扫库发现新集后自动下载，可单独设置画质
+- 定时任务：每天/每周指定时间自动全量扫库（最新 + 热播 + 精选 / 野果探索 / 演员订阅）
+- 订阅追更：订阅的剧在扫库发现新集后自动下载，可单独设置画质；欧美影视按演员订阅自动下载新片
 - 下载目录、目录模板可通过设置页或环境变量指定
 - 集封面：下载完成自动从视频抽帧生成 Jellyfin `-thumb.jpg`，支持单剧/批量/全部补全
 - 内置 HLS 观看代理，不下载也可以先在网页里看
@@ -35,6 +38,43 @@
 - **详情页**：封面、评分、题材、简介、下载进度、体积估算、分集网格、NFO 操作；桌面 3 栏，窄屏自动折叠。
 
 > 仅用于个人媒体库整理。内容为成人向 AI 短剧（18+），请遵守站点条款与当地法律法规，不要公开传播。
+
+## 1.11.0 欧美影视：演员订阅 + 电影刮削
+
+- **新适配器 `app/adapters/ph.py`**：接入 Pornhub 风格博主页站点（站点根地址在「欧美影视 → 设置 → 欧美影视站点」填写，支持镜像域名）。
+  - 博主页：`#getAvatar` 抓博主头像；`ul/li` 视频卡解析封面（`li/div/div[1]/a`）、标题（`…/div[2]/div[2]/span/a`）、时长、播放量；翻页按钮区解析 `?page=N` 全部页。
+  - 视频详情页：标签块（含用户提供的绝对 XPath 兜底）、视频区域 `flashvars` / `mediaDefinitions` 提取 mp4 直链（1080/720/480…）与 hls。
+  - 下载画质映射：HEVC / H264 → 最高画质直链，720P → 720 直链（`stream_url` 画质选择接入下载器）。
+- **演员订阅**（新表 `creator_subs` + `app/creators.py`）：侧栏「演员订阅」页粘贴博主页地址即可订阅；自动抓名称 / 头像，支持启用 / 停用、自动下载开关、单独画质、每博主页数上限、立即采集（只扫该博主）、刷新资料、批量下载未完成影片。扫描时每个启用的订阅是 `ph_creator` 模块的一个列表（`list_tabs` 动态列表，扫描器自动发现）。
+- **影片归属**：`dramas.creator_key` 新列，列表阶段即绑定博主（详情解析失败也能归属）；订阅开启自动下载时，扫描发现的新影片自动入队（`last_auto_count` 等统计回写）。
+- **Emby 电影刮削**：欧美影视每部影片独立目录 `博主影片/标题 (年份)/标题 (年份).mp4` + `movie.nfo`；简介用（翻译后的）标题兜底；`<actor>` 写博主，头像下载缓存到 `data/avatars/` 并复制进影片目录 `actors/`；横版封面自动生成 2:3 标准海报（模糊背景 + 原图居中）。
+- **翻译**：英文标题走免费 Google 翻译（设置开关），译名写入 `<title>`、原文 `<originaltitle>`。
+- **播放**：`get_playback` 返回 hls + mp4 直链；HLS 播放代理白名单自动吸收运行期发现的媒体 CDN 域名（`allowed_hosts()`）。
+- 新端点：`GET/POST /api/creator-subs`、`PUT/DELETE /api/creator-subs/{id}`、`POST /api/creator-subs/{id}/scan|refresh`、`POST /api/creator-subs/download`；`/avatars` 静态目录。
+- 新增 16 个单测（解析 / 订阅 / 扫描联动 / 电影刮削），共 55 个全部通过。
+
+## 1.10.0 分区导航 / 标题翻译 / 演员
+
+- 新增「导航首页」：打开项目先选分区（短剧 / 欧美影视），进入后各自独立的媒体库、模块计数与采集入口；左侧「切换分区」随时返回。
+- **分区完全隔离**：侧边栏状态 / 题材 / 存储统计、设置（下载目录、目录模板、画质、翻译、刮削开关）、下载队列、更新提醒、订阅追更、重复剧、标签、定时任务、扫描历史、封面补全全部按分区计算；未单独设置的分区沿用全局默认值。
+- 支持 `?group=film` 深链直接进入某个分区，并记住上次选择。
+- 分区与模块由 `MODULE_GROUPS` 与 `MODULES[*].group` 描述：新增站点只需注册一个模块并指定 group，导航、侧栏、采集弹窗自动出现，不用改查询 / 下载 / 刮削代码。
+- 「欧美影视」分区已内置博主影片模块（`ph` 源 + `ph_creator` 模块，电影结构），站点地址与博主在页面里配置。
+- 媒体库、全选与统计按分区隔离：`GET /api/dramas?group=film`；统计新增 `by_group`。
+- 标题翻译（开关控制）：设置页「翻译英文标题」使用免费 Google 翻译，结果缓存在 `translations` 表；译名只影响展示与 NFO，`title` 原文与同名去重逻辑不变。
+- NFO 规范化：`<title>` 用译名、`<originaltitle>` 保留站点原文；新增 `<actor><name>/<role>/<thumb>`，演员头像复制到剧集目录的 `actors/` 下。
+- 简介为空时 `plot` 用标题兜底（影视类站点常见）。
+- 模块支持 `media_type: "tv" | "movie"`：电影模式输出 `<title> (<year>)/<title> (<year>).mp4` + `movie.nfo`（`<movie>` 根节点），不再生成 `Season 01` 和分集 NFO；卡片与详情页显示「电影 / 正片」。
+- 适配器扩展点打通：`app/adapters/template.py` 模板 + [docs/adapter-guide.md](docs/adapter-guide.md) 开发指南（接口契约、注册三步、调试与常见坑）；演员头像根据 `actors[].thumb_url` 自动下载并写入 NFO；播放代理白名单从适配器的 `cdn_hosts` 自动扩展。
+- 新增 16 个单测（分区隔离、适配器契约端到端、电影模式、演员头像、翻译缓存、NFO），共 39 个全部通过。
+
+## 扩展：接入新站点
+
+1. 复制 `app/adapters/template.py` 为 `app/adapters/mysite.py`，实现 `page_count / fetch_listing_page / fetch_detail / get_playback / save_cover`。
+2. 在 `app/config.py` 的 `SOURCES` 加站点、`MODULES` 加模块（`"group": "film"` 即挂到欧美影视分区）。
+3. 在 `app/providers.py` 的 `build_providers` 注册实例。
+
+重启后导航首页、侧栏、采集弹窗会自动出现新模块，前端无需改动。完整字段说明和示例见 [docs/adapter-guide.md](docs/adapter-guide.md)。
 
 ## 1.9.1 重复剧批量操作
 
@@ -177,12 +217,22 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8766
 
 ## 3. 第一次使用
 
+短剧分区：
+
 1. 点右上角 **开始采集**。
 2. 勾选模块（原创 / 短剧 / 漫剧 / 野果短剧），页数留空 = 全部。
 3. 保持 **同步详情与分集** 勾选（下载必需）。
 4. 开始。列表扫描很快；详情按 6 并发同步，全量约 5–15 分钟。
 5. 回到媒体库，点卡片进入详情，选画质后「下载全集」。
 6. 下载完成后，在 **设置 → 下载根目录** 找到文件；把模块子目录加入 Jellyfin。
+
+欧美影视分区：
+
+1. 首页切到「欧美影视」→ **设置 → 欧美影视站点** 填站点根地址（如 `https://www.pornhub.com`），点「测试欧美站」确认连通。
+2. 侧栏 **演员订阅 → ＋添加博主**：粘贴博主页地址（`/model/…`、`/channels/…`、`/users/…` 均可），保存时自动抓名称与头像。
+3. 列表里点 **立即采集**（只扫该博主）或「开始采集」（扫全部启用的博主）；新影片自动入库，开启自动下载的直接入队。
+4. 标题翻译：设置页打开「翻译英文标题」，详情同步时自动译成中文并写入 NFO。
+5. Emby 把 `下载根目录/博主影片` 添加为**电影**库即可（`movie.nfo` + `poster.jpg` + 演员 `actors/`）。
 
 首次建议先用「页数 = 1」试跑，确认流程正常再全量。
 
@@ -244,6 +294,22 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8766
   `下载根目录/原创`、`/短剧`、`/漫剧`。这样每个模块目录下就是标准的「剧集/Season」结构。
 - 已下载分集立刻生成单集 NFO；`tvshow.nfo` 会随集数更新。
 - 想手动刷新：详情页「生成 NFO」；想批量：直接重新下载/重新扫描后自动写。
+
+欧美影视（电影结构）：
+
+```text
+下载根目录/
+  博主影片/
+    影片标题 (2025)/
+      movie.nfo
+      poster.jpg          2:3 标准海报（横版封面自动转换）
+      fanart.jpg
+      影片标题 (2025).mp4
+      actors/Jane Doe.jpg 博主头像
+```
+
+- `<movie>` 根节点，`<title>` 用译名、`<originaltitle>` 保留原文，简介为空时用标题兜底。
+- `<actor>` 写博主（演员）与头像；Emby 直接把 `博主影片` 目录添加为电影库。
 
 设置项 `write_nfo` / `write_fanart` 可关闭。`auto_tag_done` 控制全集完成后是否自动加「已下载」标签。
 
@@ -323,6 +389,10 @@ huangguo-collector/
     db.py           SQLite 表结构与数据访问
     scraper.py      黄果列表/详情/播放接口/封面解密
     yeguo.py        野果列表/播放 AES 解密/封面
+    adapters/
+      template.py   适配器模板
+      ph.py         欧美影视博主页适配器
+    creators.py     演员订阅管理（博主 CRUD + 头像）
     providers.py    站点 Provider 注册表
     scan.py         全量与增量扫描调度
     scheduler.py    定时任务调度器
@@ -337,7 +407,7 @@ huangguo-collector/
     app.js          前端逻辑（无构建）
     style.css       深色主题
     hls.min.js      hls.js 1.6.13（Apache-2.0）
-  data/             运行时生成：DB、封面、临时文件
+  data/             运行时生成：DB、封面、头像、临时文件
   huangguo-downloads/ 默认下载根目录
   docker/entrypoint.sh 容器入口
   Dockerfile
@@ -372,6 +442,11 @@ huangguo-collector/
 | POST | `/api/dramas/{id}/subscribe` | `{enabled, quality, auto_download, download_now}` |
 | DELETE | `/api/subscriptions/{id}` | 取消订阅 |
 | POST | `/api/subscriptions/download` | 下载全部订阅更新 |
+| GET/POST | `/api/creator-subs` | 演员订阅列表 / 添加博主 `{url, quality, max_pages, auto_download, enabled}` |
+| PUT/DELETE | `/api/creator-subs/{id}` | 更新 / 删除演员订阅 |
+| POST | `/api/creator-subs/{id}/scan` | 立即采集该博主（只扫他的全部翻页） |
+| POST | `/api/creator-subs/{id}/refresh` | 重新抓取博主名称与头像 |
+| POST | `/api/creator-subs/download` | 下载全部博主未完成影片 |
 | GET/POST/PUT/DELETE | `/api/schedules` | 定时任务 CRUD |
 | POST | `/api/schedules/{id}/run` | 立即执行定时任务 |
 | POST | `/api/settings/check-path` | 校验/创建下载目录并返回剩余空间 |
@@ -383,7 +458,7 @@ huangguo-collector/
 | POST | `/api/excluded-tags` | `{name}` 排除标签 |
 | DELETE | `/api/excluded-tags?name=` | 恢复标签 |
 | POST | `/api/downloads/pause` / `resume` | 暂停 / 继续下载队列 |
-| GET | `/api/site-check` | 测试站点连通性；`?source=huangguo|yeguo` |
+| GET | `/api/site-check` | 测试站点连通性；`?source=huangguo|yeguo|ph` |
 | GET | `/api/tasks` | 队列与历史任务 |
 | POST | `/api/tasks/retry-failed` | 重试全部失败任务 |
 | POST | `/api/tasks/clear` | `{states}` 清理完成/取消/失败记录 |
@@ -415,12 +490,12 @@ huangguo-collector/
 
 镜像已发布到 Docker Hub（`linux/amd64`，适配 Z4 Pro）：
 
-- **镜像**：`jokermelove/huangguo-collector:1.9.1`（另有 `latest`）
+- **镜像**：`jokermelove/huangguo-collector:1.11.1`（另有 `latest`）
 - **GitHub**：<https://github.com/king-joker-z/huangguo-collector>
 - **Actions**：推送到 `main` 自动构建并推送 Docker Hub，也可在 Actions 页手动 `Run workflow`
 
 ```sh
-docker pull jokermelove/huangguo-collector:1.9.1
+docker pull jokermelove/huangguo-collector:1.11.1
 ```
 
 ### 方式 A：极空间直接拉取镜像（推荐）
@@ -446,7 +521,7 @@ docker compose -f docker-compose.zspace.yml up -d
 本机有 Docker 时：
 
 ```sh
-docker build --platform linux/amd64 -t jokermelove/huangguo-collector:1.9.1 .
+docker build --platform linux/amd64 -t jokermelove/huangguo-collector:1.11.1 .
 # 或
 docker compose up -d --build
 ```

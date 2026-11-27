@@ -11,10 +11,34 @@ from fastapi import APIRouter, Body, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
 
 from . import nfo
-from .config import MODULES, VERSION
+from .actors import ensure_avatars
+from .config import (
+    GROUP_ORDER,
+    MODULE_GROUPS,
+    MODULES,
+    VERSION,
+    module_group,
+    module_media_type,
+    modules_in_group,
+)
+from .creators import CreatorManager
 from .db import now_str
+from .groupctx import reset_group, set_group
 from .providers import provider_summary
-from .runtime import covers, db, downloads, hls, scan, scheduler, scraper, scrapers, settings
+from .runtime import (
+    covers,
+    creators,
+    db,
+    downloads,
+    hls,
+    scan,
+    scheduler,
+    scraper,
+    scrapers,
+    settings,
+    title_translate,
+    translator,
+)
 from .scheduler import format_datetime, next_run_at
 from .scraper import ScrapeError
 
@@ -47,13 +71,17 @@ def _ensure_episodes(drama_id: int) -> dict:
         return row
     source = str(row.get("source") or "huangguo")
     site_scraper = scrapers.get(source) or scraper
+    token = set_group(module_group(str(row.get("module") or "")))
     try:
         detail = site_scraper.fetch_detail(str(row["site_id"]))
+        ensure_avatars(site_scraper, detail)
         db.apply_detail(str(row["site_id"]), detail)
         if not row.get("cover_path"):
             site_scraper.save_cover(str(row["site_id"]), detail.get("cover_url") or "")
     except ScrapeError as exc:
         fail(f"同步详情失败: {exc}", 502)
+    finally:
+        reset_group(token)
     fresh = db.get_drama(drama_id)
     return dict(fresh) if fresh else row
 
@@ -94,27 +122,32 @@ def _open_folder(folder: Path) -> dict:
 
 # --------------------------------------------------------------------- health
 @router.get("/health")
-def health():
+def health(group: str = ""):
     ffmpeg = shutil.which("ffmpeg")
+    root = settings.root_for(group)
     free = 0
     try:
-        free = shutil.disk_usage(str(settings.download_root)).free
+        free = shutil.disk_usage(str(root)).free
     except OSError:
         pass
     return ok(
         ffmpeg=bool(ffmpeg),
         ffmpeg_path=ffmpeg or "",
         disk_free=free,
-        download_root=str(settings.download_root),
+        download_root=str(root),
         workers=downloads.worker_count,
         version=VERSION,
+        group=group,
     )
 
 
 @router.get("/site-check")
-def site_check(source: str = "huangguo"):
+def site_check(source: str = "huangguo", group: str = ""):
     site_scraper = scrapers.get(source) or scraper
+    if not str(getattr(site_scraper, "site_base", "") or "").strip():
+        fail("欧美站点地址未配置：请到「欧美影视 → 设置」填写站点根地址", 400)
     started = time.perf_counter()
+    token = set_group(group)
     try:
         kwargs = {"timeout": 12}
         site_scraper.http.get_bytes(site_scraper.check_url, **kwargs)
@@ -122,32 +155,61 @@ def site_check(source: str = "huangguo"):
         fail(f"站点连接失败: {exc}", 502)
     except Exception as exc:
         fail(f"站点连接失败: {exc}", 502)
+    finally:
+        reset_group(token)
     latency = int((time.perf_counter() - started) * 1000)
     return ok(latency_ms=latency, source=source, message=f"站点连接正常 · {latency}ms")
 
 
 @router.get("/stats")
-def stats():
-    data = db.stats(ttl=0)
+def stats(group: str = ""):
+    data = db.stats(ttl=0, group=group)
     data["scan"] = scan.status()
-    data["tasks"] = downloads.summary()
+    data["tasks"] = downloads.summary(group=group)
     return ok(**data)
 
 
 @router.get("/activity")
-def activity():
+def activity(group: str = ""):
     return ok(
         scan=scan.status(),
-        tasks=downloads.active(),
-        summary=downloads.summary(),
+        tasks=downloads.active(group=group),
+        summary=downloads.summary(group=group),
         covers=covers.status(),
-        stats=db.stats(),
+        translate=title_translate.status(),
+        stats=db.stats(group=group),
+        group=group,
     )
 
 
 @router.get("/modules")
 def modules():
-    return ok(modules=[{"key": k, "label": v["label"], "desc": v["desc"]} for k, v in MODULES.items()])
+    groups = []
+    for key in GROUP_ORDER:
+        meta = MODULE_GROUPS.get(key, {})
+        groups.append(
+            {
+                "key": key,
+                "label": meta.get("label", key),
+                "icon": meta.get("icon", ""),
+                "desc": meta.get("desc", ""),
+                "modules": modules_in_group(key),
+            }
+        )
+    return ok(
+        modules=[
+            {
+                "key": k,
+                "label": v["label"],
+                "icon": v.get("icon", ""),
+                "desc": v["desc"],
+                "group": v.get("group", "duanju"),
+                "media_type": module_media_type(k),
+            }
+            for k, v in MODULES.items()
+        ],
+        groups=groups,
+    )
 
 
 @router.get("/providers")
@@ -170,10 +232,11 @@ def list_dramas(
     site_tag: str = "",
     source: str = "",
     include_duplicates: bool = False,
+    group: str = "",
 ):
     return ok(**db.list_dramas(
         module, q, status, tag, sort, page, per_page, score_min, year, site_tag,
-        source, include_duplicates,
+        source, include_duplicates, group,
     ))
 
 
@@ -189,9 +252,11 @@ def list_drama_ids(
     site_tag: str = "",
     source: str = "",
     include_duplicates: bool = False,
+    group: str = "",
 ):
     ids = db.list_drama_ids(
-        module, q, status, tag, sort, score_min, year, site_tag, source, include_duplicates
+        module, q, status, tag, sort, score_min, year, site_tag, source,
+        include_duplicates, group,
     )
     return ok(ids=ids, total=len(ids))
 
@@ -216,13 +281,17 @@ def scan_drama(drama_id: int):
     row = _drama_or_404(drama_id)
     source = str(row.get("source") or "huangguo")
     site_scraper = scrapers.get(source) or scraper
+    token = set_group(module_group(str(row.get("module") or "")))
     try:
         detail = site_scraper.fetch_detail(str(row["site_id"]))
+        ensure_avatars(site_scraper, detail)
         db.apply_detail(str(row["site_id"]), detail)
         site_scraper.save_cover(str(row["site_id"]), detail.get("cover_url") or "")
         scan.auto_download(drama_id)
     except ScrapeError as exc:
         fail(f"同步失败: {exc}", 502)
+    finally:
+        reset_group(token)
     data = db.get_drama_detail(drama_id)
     return ok(drama=data, message="详情已更新")
 
@@ -233,7 +302,8 @@ def download_drama(drama_id: int, payload: dict | None = Body(None)):
     row = _ensure_episodes(drama_id)
     scope = str(payload.get("scope") or "all")
     eps = payload.get("eps") or []
-    quality = str(payload.get("quality") or settings.get("quality", "hevc"))
+    drama_group = module_group(str(row.get("module") or ""))
+    quality = str(payload.get("quality") or settings.get("quality", group=drama_group))
     force = bool(payload.get("force"))
     numbers = _episode_numbers(drama_id, scope, [int(e) for e in eps])
     if not numbers:
@@ -254,8 +324,14 @@ def cancel_drama(drama_id: int):
 
 @router.post("/dramas/{drama_id}/tags")
 def set_tags(drama_id: int, payload: dict = Body(...)):
-    _drama_or_404(drama_id)
-    db.set_drama_tags(drama_id, [str(t) for t in payload.get("add", [])], [str(t) for t in payload.get("remove", [])])
+    row = _drama_or_404(drama_id)
+    group = module_group(str(row.get("module") or ""))
+    db.set_drama_tags(
+        drama_id,
+        [str(t) for t in payload.get("add", [])],
+        [str(t) for t in payload.get("remove", [])],
+        group=group,
+    )
     return ok(tags=db.tags_for_drama(drama_id))
 
 
@@ -297,8 +373,8 @@ def open_folder(drama_id: int):
 
 
 @router.post("/open-root")
-def open_root():
-    return _open_folder(settings.download_root)
+def open_root(group: str = ""):
+    return _open_folder(settings.root_for(group))
 
 
 @router.post("/dramas/batch")
@@ -307,8 +383,15 @@ def batch(payload: dict = Body(...)):
     action = str(payload.get("action") or "")
     if not ids:
         fail("没有选择剧集")
-    quality = str(payload.get("quality") or settings.get("quality", "hevc"))
+    quality = str(payload.get("quality") or "")
     force = bool(payload.get("force"))
+
+    def quality_for(drama_id: int) -> str:
+        if quality in ("hevc", "h264", "720p"):
+            return quality
+        row = db.get_drama(drama_id)
+        group = module_group(str(row["module"] or "")) if row else ""
+        return settings.get("quality", group=group)
 
     if action in ("download", "download_new"):
         total_queued = total_skipped = 0
@@ -316,9 +399,9 @@ def batch(payload: dict = Body(...)):
             try:
                 _ensure_episodes(drama_id)
                 if action == "download_new":
-                    result = downloads.enqueue_new(drama_id, quality, force=force)
+                    result = downloads.enqueue_new(drama_id, quality_for(drama_id), force=force)
                 else:
-                    result = downloads.enqueue_all(drama_id, quality, force=force)
+                    result = downloads.enqueue_all(drama_id, quality_for(drama_id), force=force)
                 total_queued += result["queued"]
                 total_skipped += result["skipped"]
             except Exception:
@@ -335,11 +418,16 @@ def batch(payload: dict = Body(...)):
                         continue
                     source = str(row["source"] or "huangguo")
                     site_scraper = scrapers.get(source) or scraper
-                    detail = site_scraper.fetch_detail(str(row["site_id"]))
-                    db.apply_detail(str(row["site_id"]), detail)
-                    if not row["cover_path"]:
-                        site_scraper.save_cover(str(row["site_id"]), detail.get("cover_url") or "")
-                    scan.auto_download(drama_id)
+                    token = set_group(module_group(str(row["module"] or "")))
+                    try:
+                        detail = site_scraper.fetch_detail(str(row["site_id"]))
+                        ensure_avatars(site_scraper, detail)
+                        db.apply_detail(str(row["site_id"]), detail)
+                        if not row["cover_path"]:
+                            site_scraper.save_cover(str(row["site_id"]), detail.get("cover_url") or "")
+                        scan.auto_download(drama_id)
+                    finally:
+                        reset_group(token)
                 except Exception:
                     continue
 
@@ -347,8 +435,6 @@ def batch(payload: dict = Body(...)):
         return ok(message=f"已开始同步 {len(ids)} 部剧集")
 
     if action in ("subscribe", "unsubscribe"):
-        if quality not in ("hevc", "h264", "720p"):
-            quality = "hevc"
         auto = bool(payload.get("auto_download", True))
         download_now = bool(payload.get("download_now"))
         changed = skipped = queued = failed = 0
@@ -364,12 +450,13 @@ def batch(payload: dict = Body(...)):
                 else:
                     skipped += 1
                 continue
-            db.set_subscription(drama_id, True, quality, auto)
+            drama_quality = quality_for(drama_id)
+            db.set_subscription(drama_id, True, drama_quality, auto)
             changed += 1
             if download_now:
                 try:
                     _ensure_episodes(drama_id)
-                    result = downloads.enqueue_new(drama_id, quality)
+                    result = downloads.enqueue_new(drama_id, drama_quality)
                     queued += int(result.get("queued") or 0)
                 except Exception:
                     failed += 1
@@ -378,7 +465,7 @@ def batch(payload: dict = Body(...)):
                       message=f"已取消 {changed} 部订阅，跳过 {skipped} 部")
         return ok(
             changed=changed, skipped=skipped, queued=queued, failed=failed,
-            quality=quality, auto_download=auto,
+            quality=quality or "按分区默认", auto_download=auto,
             message=f"已订阅 {changed} 部，跳过 {skipped} 部" + (f"，入队 {queued} 集" if queued else ""),
         )
 
@@ -386,7 +473,9 @@ def batch(payload: dict = Body(...)):
         add = [str(t) for t in payload.get("add", [])]
         remove = [str(t) for t in payload.get("remove", [])]
         for drama_id in ids:
-            db.set_drama_tags(drama_id, add, remove)
+            row = db.get_drama(drama_id)
+            drama_group = module_group(str(row["module"] or "")) if row else ""
+            db.set_drama_tags(drama_id, add, remove, group=drama_group)
         return ok(message=f"已更新 {len(ids)} 部剧集的标签")
 
     if action == "favorite":
@@ -405,9 +494,9 @@ def batch(payload: dict = Body(...)):
 
 # -------------------------------------------------------------------- duplicates
 @router.get("/duplicates")
-def duplicates():
-    groups = db.list_duplicate_groups()
-    return ok(groups=groups, total=len(groups))
+def duplicates(group: str = ""):
+    groups = db.list_duplicate_groups(scope=group)
+    return ok(groups=groups, total=len(groups), group=group)
 
 
 @router.post("/duplicates/batch")
@@ -418,9 +507,8 @@ def batch_duplicates(payload: dict = Body(...)):
         fail("没有选择版本")
     if action not in ("keep", "unkeep", "subscribe", "download"):
         fail("未知的批量操作")
-    quality = str(payload.get("quality") or settings.get("quality", "hevc"))
-    if quality not in ("hevc", "h264", "720p"):
-        quality = "hevc"
+    scope = str(payload.get("group") or "")
+    quality = str(payload.get("quality") or "")
     auto = bool(payload.get("auto_download", True))
     changed = skipped = queued = failed = 0
     for drama_id in ids:
@@ -428,6 +516,10 @@ def batch_duplicates(payload: dict = Body(...)):
         if not row or db.is_tag_excluded(drama_id):
             skipped += 1
             continue
+        drama_group = module_group(str(row["module"] or ""))
+        drama_quality = quality if quality in ("hevc", "h264", "720p") else settings.get(
+            "quality", group=drama_group
+        )
         try:
             if action in ("keep", "unkeep"):
                 db.set_duplicate_keep(drama_id, action == "keep")
@@ -435,13 +527,13 @@ def batch_duplicates(payload: dict = Body(...)):
             elif action == "subscribe":
                 if int(row["is_duplicate"] or 0):
                     db.set_duplicate_keep(drama_id, True)
-                db.set_subscription(drama_id, True, quality, auto)
+                db.set_subscription(drama_id, True, drama_quality, auto)
                 changed += 1
             elif action == "download":
                 if int(row["is_duplicate"] or 0):
                     db.set_duplicate_keep(drama_id, True)
                 _ensure_episodes(drama_id)
-                result = downloads.enqueue_all(drama_id, quality)
+                result = downloads.enqueue_all(drama_id, drama_quality)
                 queued += int(result.get("queued") or 0)
                 changed += 1
         except Exception:
@@ -455,7 +547,7 @@ def batch_duplicates(payload: dict = Body(...)):
     else:
         message = f"已入队 {queued} 集，处理 {changed} 个版本" + (f"，失败 {failed} 个" if failed else "")
     return ok(
-        groups=db.list_duplicate_groups(),
+        groups=db.list_duplicate_groups(scope=scope),
         changed=changed, skipped=skipped, queued=queued, failed=failed,
         message=message,
     )
@@ -464,54 +556,59 @@ def batch_duplicates(payload: dict = Body(...)):
 @router.post("/duplicates/{drama_id}/prefer")
 def prefer_duplicate(drama_id: int, payload: dict | None = Body(None)):
     payload = payload or {}
+    scope = str(payload.get("group") or "")
     try:
         db.prefer_duplicate(drama_id, merge_metadata=bool(payload.get("merge_metadata", True)))
     except KeyError as exc:
         fail(str(exc), 404)
     except ValueError as exc:
         fail(str(exc))
-    return ok(groups=db.list_duplicate_groups(), message="已设为主版本")
+    return ok(groups=db.list_duplicate_groups(scope=scope), message="已设为主版本")
 
 
 @router.post("/duplicates/{drama_id}/keep")
 def keep_duplicate(drama_id: int, payload: dict | None = Body(None)):
     payload = payload or {}
+    scope = str(payload.get("group") or "")
     try:
         db.set_duplicate_keep(drama_id, keep=bool(payload.get("keep", True)))
     except KeyError as exc:
         fail(str(exc), 404)
     except ValueError as exc:
         fail(str(exc))
-    return ok(groups=db.list_duplicate_groups(), message="已更新独立保留状态")
+    return ok(groups=db.list_duplicate_groups(scope=scope), message="已更新独立保留状态")
 
 
 @router.post("/duplicates/{drama_id}/auto")
-def reset_duplicate(drama_id: int):
+def reset_duplicate(drama_id: int, payload: dict | None = Body(None)):
+    payload = payload or {}
+    scope = str(payload.get("group") or "")
     try:
         db.reset_duplicate_preference(drama_id)
     except KeyError as exc:
         fail(str(exc), 404)
     except ValueError as exc:
         fail(str(exc))
-    return ok(groups=db.list_duplicate_groups(), message="已恢复自动选择")
+    return ok(groups=db.list_duplicate_groups(scope=scope), message="已恢复自动选择")
 
 
 # -------------------------------------------------------------------- updates
 @router.get("/updates")
-def updates(limit: int = 120):
-    items = db.updates(limit)
+def updates(limit: int = 120, group: str = ""):
+    items = db.updates(limit, group=group)
     return ok(items=items, total=len(items))
 
 
 # --------------------------------------------------------------- subscriptions
 @router.get("/subscriptions")
-def subscriptions():
-    items = db.list_subscriptions()
+def subscriptions(group: str = ""):
+    items = db.list_subscriptions(group=group)
     return ok(
         items=items,
         total=len(items),
         updates=sum(1 for item in items if item.get("has_update")),
         auto=sum(1 for item in items if item.get("sub_auto")),
+        group=group,
     )
 
 
@@ -519,7 +616,8 @@ def subscriptions():
 def subscribe(drama_id: int, payload: dict | None = Body(None)):
     payload = payload or {}
     row = _drama_or_404(drama_id)
-    quality = str(payload.get("quality") or settings.get("quality", "hevc"))
+    drama_group = module_group(str(row.get("module") or ""))
+    quality = str(payload.get("quality") or settings.get("quality", group=drama_group))
     if quality not in ("hevc", "h264", "720p"):
         quality = "hevc"
     auto = bool(payload.get("auto_download", True))
@@ -552,14 +650,16 @@ def unsubscribe(drama_id: int):
 def subscriptions_download(payload: dict | None = Body(None)):
     payload = payload or {}
     ids = [int(i) for i in (payload.get("ids") or [])]
-    rows = db.list_subscriptions()
+    group = str(payload.get("group") or "")
+    rows = db.list_subscriptions(group=group)
     if ids:
         rows = [row for row in rows if int(row["id"]) in ids]
     queued = 0
     for row in rows:
         if not row.get("sub_enabled") or not row.get("has_update"):
             continue
-        quality = row.get("sub_quality") or settings.get("quality", "hevc")
+        drama_group = module_group(str(row.get("module") or ""))
+        quality = row.get("sub_quality") or settings.get("quality", group=drama_group)
         queued += downloads.enqueue_new(int(row["id"]), quality)["queued"]
     return ok(queued=queued, message=f"已加入队列 {queued} 集")
 
@@ -578,10 +678,114 @@ def subscriptions_auto(payload: dict = Body(...)):
     return ok(auto_download=auto, quality=quality)
 
 
+# ---------------------------------------------------------------- creator subs
+@router.get("/creator-subs")
+def creator_subs(group: str = ""):
+    items = creators.list()
+    return ok(
+        items=items,
+        total=len(items),
+        enabled=sum(1 for item in items if item.get("enabled")),
+        auto=sum(1 for item in items if item.get("auto_download")),
+        base=str((scrapers.get("ph").site_base if scrapers.get("ph") else "") or ""),
+        group=group,
+    )
+
+
+@router.post("/creator-subs")
+def creator_sub_add(payload: dict = Body(...)):
+    url = str(payload.get("url") or "").strip()
+    if not url:
+        fail("请填写博主页地址")
+    try:
+        item, warning = creators.add(
+            url,
+            auto_download=bool(payload.get("auto_download", True)),
+            quality=str(payload.get("quality") or ""),
+            max_pages=int(payload.get("max_pages") or 0),
+            enabled=bool(payload.get("enabled", True)),
+        )
+    except ScrapeError as exc:
+        fail(str(exc), 502)
+    except Exception as exc:
+        fail(f"添加演员订阅失败: {exc}", 502)
+    message = f"已订阅博主「{item.get('name') or item.get('creator_key')}」"
+    if warning:
+        message += f"；{warning}"
+    return ok(creator=item, message=message, warning=warning)
+
+
+@router.put("/creator-subs/{creator_id}")
+def creator_sub_update(creator_id: int, payload: dict = Body(...)):
+    try:
+        item = creators.update(creator_id, **(payload or {}))
+    except KeyError:
+        fail("演员订阅不存在", 404)
+    except ScrapeError as exc:
+        fail(str(exc), 502)
+    return ok(creator=item, message="演员订阅已更新")
+
+
+@router.delete("/creator-subs/{creator_id}")
+def creator_sub_delete(creator_id: int):
+    try:
+        creators.delete(creator_id)
+    except KeyError:
+        fail("演员订阅不存在", 404)
+    return ok(message="已删除演员订阅")
+
+
+@router.post("/creator-subs/{creator_id}/refresh")
+def creator_sub_refresh(creator_id: int):
+    try:
+        item, message = creators.refresh(creator_id)
+    except KeyError:
+        fail("演员订阅不存在", 404)
+    except ScrapeError as exc:
+        fail(str(exc), 502)
+    return ok(creator=item, message=message)
+
+
+@router.post("/creator-subs/{creator_id}/scan")
+def creator_sub_scan(creator_id: int):
+    item = db.get_creator_sub(creator_id)
+    if not item:
+        fail("演员订阅不存在", 404)
+    started, message = scan.start(
+        ["ph_creator"], details=True, tab=f"sub:{int(creator_id)}"
+    )
+    if not started:
+        fail(message, 409)
+    return ok(scan=scan.status(), message=f"开始采集「{item.get('name') or item.get('creator_key')}」")
+
+
+@router.post("/creator-subs/download")
+def creator_subs_download(payload: dict = None):
+    """把演员订阅博主的全部未下载影片加入队列。"""
+    payload = payload or {}
+    ids = [int(i) for i in (payload.get("ids") or [])]
+    items = creators.list()
+    if ids:
+        items = [item for item in items if int(item["id"]) in ids]
+    queued = 0
+    for item in items:
+        if not item.get("enabled"):
+            continue
+        creator_key = str(item.get("creator_key") or "")
+        rows = db.query(
+            "SELECT id FROM dramas WHERE source='ph' AND creator_key=? AND is_duplicate=0",
+            (creator_key,),
+        )
+        quality = str(item.get("quality") or "") or settings.get("quality", group="film")
+        for row in rows:
+            queued += downloads.enqueue_new(int(row["id"]), quality)["queued"]
+    return ok(queued=queued, message=f"已加入队列 {queued} 部")
+
+
 # ----------------------------------------------------------------------- tags
 @router.get("/tags")
-def tags():
-    return ok(tags=db.list_tags(), excluded=db.list_excluded_tags())
+def tags(group: str = ""):
+    return ok(tags=db.list_tags(group=group), excluded=db.list_excluded_tags(), group=group)
 
 
 @router.post("/tags")
@@ -590,14 +794,15 @@ def create_tag(payload: dict = Body(...)):
     if not name:
         fail("标签名不能为空")
     color = str(payload.get("color") or "#e5484d")
-    db.ensure_tag(name, color, "custom")
-    return ok(tags=db.list_tags())
+    group = str(payload.get("group") or "")
+    db.ensure_tag(name, color, "custom", group=group)
+    return ok(tags=db.list_tags(group=group))
 
 
 @router.delete("/tags/{tag_id}")
-def delete_tag(tag_id: int):
+def delete_tag(tag_id: int, group: str = ""):
     db.delete_tag(tag_id)
-    return ok(tags=db.list_tags())
+    return ok(tags=db.list_tags(group=group))
 
 
 @router.get("/excluded-tags")
@@ -625,8 +830,13 @@ def remove_excluded_tag(name: str = Query(...)):
 
 # ------------------------------------------------------------------- settings
 @router.get("/settings")
-def get_settings():
-    return ok(settings=settings.all(), modules=list(MODULES.keys()), ffmpeg=bool(shutil.which("ffmpeg")))
+def get_settings(group: str = ""):
+    return ok(
+        settings=settings.all(group=group),
+        modules=list(MODULES.keys()),
+        ffmpeg=bool(shutil.which("ffmpeg")),
+        group=group,
+    )
 
 
 @router.post("/settings/check-path")
@@ -650,9 +860,9 @@ def check_download_path(payload: dict = Body(...)):
 
 
 @router.get("/fs/list")
-def fs_list(path: str = ""):
+def fs_list(path: str = "", group: str = ""):
     home = Path.home()
-    raw = path.strip() if path else str(settings.download_root)
+    raw = path.strip() if path else str(settings.root_for(group))
     target = Path(raw).expanduser()
     try:
         target = target.resolve()
@@ -711,16 +921,20 @@ def fs_mkdir(payload: dict = Body(...)):
 
 
 @router.put("/settings")
-def update_settings(payload: dict = Body(...)):
-    settings.update(payload)
-    return ok(settings=settings.all(), message="设置已保存")
+def update_settings(payload: dict = Body(...), group: str = ""):
+    settings.update(payload, group=group)
+    return ok(settings=settings.all(group=group), message="设置已保存", group=group)
 
 
 # ---------------------------------------------------------------------- tasks
 @router.get("/tasks")
-def tasks(state: str = "all", limit: int = 300):
+def tasks(state: str = "all", limit: int = 300, group: str = ""):
     states = None if state == "all" else [s for s in state.split(",") if s]
-    return ok(tasks=db.list_tasks(states, limit), summary=downloads.summary())
+    return ok(
+        tasks=db.list_tasks(states, limit, group=group),
+        summary=downloads.summary(group=group),
+        group=group,
+    )
 
 
 @router.post("/tasks/{task_id}/cancel")
@@ -743,8 +957,8 @@ def resume_downloads():
 
 
 @router.post("/tasks/retry-failed")
-def retry_failed_tasks():
-    result = downloads.retry_failed()
+def retry_failed_tasks(group: str = ""):
+    result = downloads.retry_failed(group=group)
     return ok(**result, message=f"已重新入队 {result['queued']} 个失败任务")
 
 
@@ -753,19 +967,20 @@ def clear_tasks(payload: dict | None = Body(None)):
     payload = payload or {}
     states = payload.get("states") or ["done", "canceled"]
     states = [str(s) for s in states]
-    db.clear_tasks(states)
+    group = str(payload.get("group") or "")
+    db.clear_tasks(states, group=group)
     return ok(message="已清理任务记录")
 
 
 @router.get("/history")
-def history():
-    return ok(items=db.recent_activity(40))
+def history(group: str = ""):
+    return ok(items=db.recent_activity(40, group=group))
 
 
 # ----------------------------------------------------------------------- scan
 @router.get("/scans")
-def scan_history(limit: int = 60):
-    return ok(items=db.list_scan_runs(limit))
+def scan_history(limit: int = 60, group: str = ""):
+    return ok(items=db.list_scan_runs(limit, group=group), group=group)
 
 
 @router.post("/scans/{run_id}/resume")
@@ -787,16 +1002,19 @@ def start_scan(payload: dict | None = Body(None)):
     modules = payload.get("modules") or [payload.get("module") or "all"]
     if isinstance(modules, str):
         modules = [modules]
+    group = str(payload.get("group") or "")
     if "all" in modules:
-        modules = list(MODULES.keys())
+        modules = modules_in_group(group) if group else list(MODULES.keys())
     pages = payload.get("pages")
     details = bool(payload.get("details", True))
     refresh = bool(payload.get("refresh", False))
+    tab = str(payload.get("tab") or "")
     started, message = scan.start(
         modules,
         details=details,
         max_pages=int(pages) if pages else None,
         refresh=refresh,
+        tab=tab,
     )
     if not started:
         fail(message, 409)
@@ -829,7 +1047,12 @@ def _schedule_payload(payload: dict) -> dict:
             weekdays.append(day)
     if not weekdays:
         fail("至少选择一天")
-    modules = [m for m in (payload.get("modules") or ["original", "duanju", "manju", "yeguo"]) if m in MODULES]
+    group = str(payload.get("group") or "")
+    default_modules = modules_in_group(group) if group else list(MODULES.keys())
+    modules = [m for m in (payload.get("modules") or default_modules) if m in MODULES]
+    if group:
+        allowed = set(default_modules)
+        modules = [m for m in modules if m in allowed]
     if not modules:
         fail("至少选择一个模块")
     return {
@@ -843,11 +1066,12 @@ def _schedule_payload(payload: dict) -> dict:
 
 
 @router.get("/schedules")
-def list_schedules():
+def list_schedules(group: str = ""):
     return ok(
-        items=db.list_schedules(),
+        items=db.list_schedules(group=group),
         active_schedule_id=scheduler.active_schedule_id,
         scan=scan.status(),
+        group=group,
     )
 
 
@@ -907,12 +1131,54 @@ def backfill_covers(payload: dict | None = Body(None)):
     payload = payload or {}
     ids = [int(i) for i in (payload.get("drama_ids") or [])]
     all_flag = bool(payload.get("all"))
+    group = str(payload.get("group") or "")
     if not ids and not all_flag:
         fail("请选择剧集，或选择补全全部已下载")
-    started, message = covers.start(ids or None, force=bool(payload.get("force")))
+    started, message = covers.start(
+        ids or None, force=bool(payload.get("force")), group=group
+    )
     if not started:
         fail(message, 409)
     return ok(message=message, covers=covers.status())
+
+
+# --------------------------------------------------------------- title translate
+@router.get("/translate")
+def translate_status(group: str = ""):
+    return ok(
+        translate=title_translate.status(),
+        enabled=translator.enabled_for(group),
+        target=translator.target_for(group),
+        group=group,
+    )
+
+
+@router.post("/translate")
+def translate_titles(payload: dict | None = Body(None)):
+    payload = payload or {}
+    ids = [int(i) for i in (payload.get("ids") or [])]
+    group = str(payload.get("group") or "")
+    started, message = title_translate.start(
+        ids or None, force=bool(payload.get("force")), group=group
+    )
+    if not started:
+        fail(message, 409)
+    return ok(translate=title_translate.status(), message=message)
+
+
+@router.post("/dramas/{drama_id}/translate")
+def translate_one(drama_id: int):
+    row = _drama_or_404(drama_id)
+    token = set_group(module_group(str(row.get("module") or "")))
+    try:
+        value = translator.translate_drama(drama_id, force=True)
+    except Exception as exc:
+        fail(f"翻译失败: {exc}", 502)
+    finally:
+        reset_group(token)
+    if not value:
+        return ok(title_zh="", message="该标题无需翻译")
+    return ok(title_zh=value, drama=db.get_drama_detail(drama_id), message="标题已翻译")
 
 
 # -------------------------------------------------------------------- playback
