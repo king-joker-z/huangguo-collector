@@ -125,6 +125,82 @@ class DatabaseStatsTests(unittest.TestCase):
         self.assertEqual(yeguo["is_duplicate"], 1)
         self.assertEqual(yeguo["duplicate_of"], huangguo_id)
 
+    def test_film_dramas_never_dedup(self):
+        """欧美影视（ph 模块）不参与同名去重，只有短剧模块去重。"""
+
+        def make(site_id, source, module, total, title):
+            card = {
+                "site_id": site_id,
+                "source": source,
+                "module": module,
+                "title": title,
+                "url": f"https://example/video/{site_id}/",
+                "cover_url": "",
+                "score": 0,
+                "total_ep": total,
+                "views": "",
+                "tags": [],
+                "badges": [],
+            }
+            drama_id, _, _ = self.db.upsert_card(card)
+            self.db.apply_detail(site_id, {
+                "title": title,
+                "description": "x",
+                "cover_url": "",
+                "score": 0,
+                "total_ep": total,
+                "tags": [],
+                "episodes": [
+                    {"ep": ep, "title": f"第{ep}集", "duration": 60}
+                    for ep in range(1, total + 1)
+                ],
+            })
+            return drama_id
+
+        # 同名影片在欧美影视内各自独立展示，不会被标记为重复
+        first = make("ph_key1", "ph", "ph_creator", 1, "同名影片")
+        second = make("ph_key2", "ph", "ph_creator", 2, "同名影片")
+        self.assertFalse(bool(self.db.get_drama(first)["is_duplicate"]))
+        self.assertFalse(bool(self.db.get_drama(second)["is_duplicate"]))
+        self.assertEqual(self.db.list_dramas(group="film")["total"], 2)
+        self.assertEqual(self.db.stats(group="film", ttl=0)["duplicates"], 0)
+        self.assertEqual(self.db.list_duplicate_groups(scope="film"), [])
+        self.assertEqual(self.db.list_duplicate_groups(), [])
+
+        # 欧美影片与短剧同名：不合并，欧美影片保持可见
+        film = make("ph_key3", "ph", "ph_creator", 5, "混合同名")
+        duanju = make("10060", "huangguo", "duanju", 10, "混合同名")
+        self.assertFalse(bool(self.db.get_drama(film)["is_duplicate"]))
+        self.assertFalse(bool(self.db.get_drama(duanju)["is_duplicate"]))
+        self.assertEqual(self.db.list_duplicate_groups(), [])
+
+        # 同名短剧之间照常去重（集数多者为主版本），欧美影片不受影响
+        yeguo = make("yeguo_10060", "yeguo", "yeguo", 20, "混合同名")
+        self.assertFalse(bool(self.db.get_drama(yeguo)["is_duplicate"]))
+        self.assertTrue(bool(self.db.get_drama(duanju)["is_duplicate"]))
+        self.assertFalse(bool(self.db.get_drama(film)["is_duplicate"]))
+        groups = self.db.list_duplicate_groups()
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(
+            {int(i["id"]) for i in groups[0]["items"]},
+            {int(duanju), int(yeguo)},
+        )
+
+        # 历史遗留的重复标记：重新打开库时自动清除
+        self.db.execute(
+            "UPDATE dramas SET is_duplicate=1,duplicate_of=?,keep_separate=1,manual_preferred=1 WHERE id=?",
+            (int(yeguo), int(film)),
+        )
+        reopened = Database(Path(self.tmp.name) / "test.db")
+        try:
+            row = reopened.get_drama(film)
+            self.assertFalse(bool(row["is_duplicate"]))
+            self.assertEqual(int(row["duplicate_of"] or 0), 0)
+            self.assertFalse(bool(row["keep_separate"]))
+            self.assertFalse(bool(row["manual_preferred"]))
+        finally:
+            reopened.conn.close()
+
     def test_excluded_site_and_custom_tags(self):
         card = {
             "site_id": "10020",

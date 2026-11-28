@@ -332,6 +332,9 @@
     // 「演员订阅」只对欧美影视分区有意义
     const creatorsNav = $('#nav-creators');
     if (creatorsNav) creatorsNav.style.display = state.group === 'film' ? '' : 'none';
+    // 「重复剧」只对短剧分区有意义：欧美影视不同名去重，同名影片各自独立展示
+    const dupsNav = $('.snav[data-nav="duplicates"]');
+    if (dupsNav) dupsNav.style.display = state.group === 'film' ? 'none' : '';
 
     const byModule = (state.stats && state.stats.by_module) || {};
     const cross = (state.stats && state.stats.cross_listed) || 0;
@@ -1474,6 +1477,14 @@
 
   async function renderDuplicatesView() {
     const token = ++renderToken;
+    if (state.group === 'film') {
+      // 欧美影视不参与同名去重：同名影片各自独立展示
+      $('#view').innerHTML = `
+        <div class="page-head"><h1>重复剧</h1><p>同名去重只作用于短剧分区</p></div>
+        ${emptyHTML('欧美影视不参与同名去重', '同名影片各自独立展示，无需处理重复版本。', '', '')}
+      `;
+      return;
+    }
     $('#view').innerHTML = '<div class="skeleton" style="height:120px;border-radius:12px"></div>';
     try {
       const res = await api(gurl('/duplicates'));

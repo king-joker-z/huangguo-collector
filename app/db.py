@@ -12,7 +12,7 @@ import unicodedata
 from datetime import datetime
 from typing import Any, Iterable
 
-from .config import DB_PATH, MODULES, SOURCES, modules_in_group
+from .config import DB_PATH, DEDUP_GROUP, MODULES, SOURCES, modules_in_group
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS dramas (
@@ -255,6 +255,40 @@ def translation_hash(source_text: str, target: str) -> str:
 
 MODULE_ORDER = ("original", "duanju", "manju", "yeguo")
 
+# 参与同名去重的模块（短剧分区）。欧美影视等其它分区的剧集一律独立展示，
+# 即使与其它影片同名也不会被标记为重复。
+DEDUP_MODULES = tuple(modules_in_group(DEDUP_GROUP))
+_DEDUP_MODULE_SET = frozenset(DEDUP_MODULES)
+
+
+def dedup_scope_sql(alias: str = "d") -> tuple[str, list[str]]:
+    """返回 (SQL 片段, 参数)：剧集属于参与同名去重的分区（短剧）。
+
+    片段里 module 与 modules_json 各有一个 IN 列表，因此参数是模块列表的两倍。
+    """
+    mods = list(DEDUP_MODULES)
+    if not mods:
+        return ("0=1", [])
+    marks = ",".join("?" for _ in mods)
+    return (
+        f"({alias}.module IN ({marks}) OR EXISTS ("
+        f"SELECT 1 FROM json_each("
+        f"CASE WHEN {alias}.modules_json IS NULL OR {alias}.modules_json='' "
+        f"THEN json_array({alias}.module) ELSE {alias}.modules_json END) jm "
+        f"WHERE jm.value IN ({marks})))",
+        mods + mods,
+    )
+
+
+def row_in_dedup_scope(row: Any) -> bool:
+    """判断一条剧集记录（sqlite3.Row 或 dict）是否属于参与同名去重的分区（短剧）。"""
+    mods = {str(row["module"] or "")}
+    try:
+        mods |= {str(m) for m in json.loads(row["modules_json"] or "[]")}
+    except Exception:
+        pass
+    return bool(mods & _DEDUP_MODULE_SET)
+
 
 def ordered_modules(modules: Any) -> list[str]:
     values = {str(m) for m in (modules or []) if str(m)}
@@ -343,6 +377,15 @@ class Database:
                 "CREATE INDEX IF NOT EXISTS idx_dramas_duplicate ON dramas(is_duplicate)"
             )
             self.conn.execute(VISIBLE_VIEW)
+            # 去重只作用于短剧分区：清掉欧美影视等其它分区历史遗留的重复标记，
+            # 被隐藏的同名影片会重新出现在媒体库与演员订阅下载中。
+            scope_sql, scope_params = dedup_scope_sql("d")
+            self.conn.execute(
+                "UPDATE dramas AS d SET duplicate_of=0,is_duplicate=0,manual_preferred=0,keep_separate=0 "
+                f"WHERE (d.duplicate_of<>0 OR d.is_duplicate<>0 OR d.manual_preferred<>0 OR d.keep_separate<>0) "
+                f"AND NOT {scope_sql}",
+                scope_params,
+            )
             self.conn.commit()
             self.resolve_all_duplicates()
 
@@ -553,19 +596,33 @@ class Database:
             return int(row["id"]), bool(has_update)
 
     def resolve_title_group(self, key: str) -> None:
-        """同名跨站点去重：集数最多者为主版本，其他来源标记为重复。"""
+        """同名跨站点去重（仅短剧分区）：集数最多者为主版本，其他来源标记为重复。
+
+        欧美影视等非短剧分区不参与去重：同名影片各自展示，
+        历史遗留的重复标记会在这一步被清除。
+        """
         if not key:
             return
         rows = self.query(
-            "SELECT id,source,total_ep,manual_preferred,keep_separate,is_duplicate FROM dramas "
-            "WHERE title_key=? ORDER BY keep_separate DESC, manual_preferred DESC, total_ep DESC, id ASC",
+            "SELECT id,module,modules_json,total_ep,manual_preferred,keep_separate,is_duplicate "
+            "FROM dramas WHERE title_key=? ORDER BY keep_separate DESC, manual_preferred DESC, total_ep DESC, id ASC",
             (key,),
         )
         if not rows:
             return
-        kept = [row for row in rows if int(row["keep_separate"] or 0)]
-        non_kept = [row for row in rows if not int(row["keep_separate"] or 0)]
-        manual = next((row for row in rows if int(row["manual_preferred"] or 0)), None)
+        eligible = [row for row in rows if row_in_dedup_scope(row)]
+        ineligible = [row for row in rows if not row_in_dedup_scope(row)]
+        for row in ineligible:
+            self.execute(
+                "UPDATE dramas SET duplicate_of=0,is_duplicate=0,manual_preferred=0,keep_separate=0 "
+                "WHERE id=? AND (duplicate_of<>0 OR is_duplicate<>0 OR manual_preferred<>0 OR keep_separate<>0)",
+                (int(row["id"]),),
+            )
+        if not eligible:
+            return
+        kept = [row for row in eligible if int(row["keep_separate"] or 0)]
+        non_kept = [row for row in eligible if not int(row["keep_separate"] or 0)]
+        manual = next((row for row in eligible if int(row["manual_preferred"] or 0)), None)
         # 手动保留的版本可以同时显示；如果保留的是当前主版本，不要再把其他版本
         # 提升为可见；如果保留的是隐藏版本，则原主版本继续显示。
         if manual:
@@ -577,10 +634,10 @@ class Database:
         elif kept:
             preferred = kept[0]
         else:
-            preferred = rows[0]
+            preferred = eligible[0]
         visible_ids = {int(row["id"]) for row in kept}
         visible_ids.add(int(preferred["id"]))
-        for row in rows:
+        for row in eligible:
             is_dup = 0 if int(row["id"]) in visible_ids else 1
             dup_of = 0 if is_dup == 0 else int(preferred["id"])
             self.execute(
@@ -590,26 +647,31 @@ class Database:
             )
 
     def resolve_all_duplicates(self) -> None:
+        scope_sql, scope_params = dedup_scope_sql("d")
         rows = self.query(
-            "SELECT title_key FROM dramas WHERE title_key<>'' "
-            "GROUP BY title_key HAVING COUNT(*)>1"
+            f"SELECT title_key FROM dramas d WHERE d.title_key<>'' AND {scope_sql} "
+            "GROUP BY title_key HAVING COUNT(*)>1",
+            scope_params,
         )
         for row in rows:
             self.resolve_title_group(str(row["title_key"]))
 
     def list_duplicate_groups(self, scope: str = "") -> list[dict]:
-        sql = """SELECT d.*,
+        outer_sql, outer_params = dedup_scope_sql("d")
+        inner_sql, inner_params = dedup_scope_sql("x")
+        sql = f"""SELECT d.*,
                  (SELECT COUNT(*) FROM episodes e WHERE e.drama_id=d.id AND e.state='done') AS done_ep,
                  (SELECT COUNT(*) FROM episodes e WHERE e.drama_id=d.id) AS ep_rows,
                  (SELECT COUNT(*) FROM subscriptions s WHERE s.drama_id=d.id AND s.enabled=1) AS subscribed_flag,
                  (SELECT s.quality FROM subscriptions s WHERE s.drama_id=d.id LIMIT 1) AS sub_quality,
                  (SELECT s.auto_download FROM subscriptions s WHERE s.drama_id=d.id LIMIT 1) AS sub_auto
                FROM dramas d
-               WHERE d.title_key<>'' AND d.title_key IN (
-                 SELECT title_key FROM dramas WHERE title_key<>''
-                 GROUP BY title_key HAVING COUNT(*)>1
+               WHERE d.title_key<>'' AND {outer_sql} AND d.title_key IN (
+                 SELECT x.title_key FROM dramas x
+                 WHERE x.title_key<>'' AND {inner_sql}
+                 GROUP BY x.title_key HAVING COUNT(*)>1
                )"""
-        params: list[Any] = []
+        params: list[Any] = [*outer_params, *inner_params]
         if scope:
             modules = modules_in_group(scope)
             if not modules:
@@ -647,11 +709,15 @@ class Database:
         row = self.get_drama(drama_id)
         if not row:
             raise KeyError("剧集不存在")
+        if not row_in_dedup_scope(row):
+            raise ValueError("欧美影视不参与同名去重")
         key = str(row["title_key"] or "")
         if not key:
             raise ValueError("该剧没有可合并的同名分组")
+        scope_sql, scope_params = dedup_scope_sql("d")
         group = [dict(r) for r in self.query(
-            "SELECT id,title FROM dramas WHERE title_key=?", (key,)
+            f"SELECT id,title FROM dramas d WHERE d.title_key=? AND {scope_sql}",
+            (key, *scope_params),
         )]
         if len(group) < 2:
             raise ValueError("该剧没有其他同名版本")
@@ -681,6 +747,8 @@ class Database:
         row = self.get_drama(drama_id)
         if not row:
             raise KeyError("剧集不存在")
+        if not row_in_dedup_scope(row):
+            raise ValueError("欧美影视不参与同名去重")
         key = str(row["title_key"] or "")
         if not key:
             raise ValueError("该剧没有同名分组")
@@ -695,6 +763,8 @@ class Database:
         row = self.get_drama(drama_id)
         if not row:
             raise KeyError("剧集不存在")
+        if not row_in_dedup_scope(row):
+            raise ValueError("欧美影视不参与同名去重")
         key = str(row["title_key"] or "")
         if not key:
             raise ValueError("该剧没有同名分组")

@@ -1,4 +1,4 @@
-﻿"""全局路径与默认配置。"""
+"""全局路径与默认配置。"""
 from __future__ import annotations
 
 import os
@@ -7,7 +7,7 @@ from pathlib import Path
 APP_DIR = Path(__file__).resolve().parent
 ROOT_DIR = APP_DIR.parent
 WEB_DIR = ROOT_DIR / "web"
-VERSION = "1.11.3"
+VERSION = "1.11.4"
 DATA_DIR = Path(os.environ.get("HUANGGUO_DATA_DIR") or (ROOT_DIR / "data")).expanduser()
 COVERS_DIR = DATA_DIR / "covers"
 EPISODE_COVERS_DIR = COVERS_DIR / "episodes"
@@ -53,6 +53,10 @@ MODULE_GROUPS = {
 }
 
 GROUP_ORDER = ("duanju", "film")
+
+# 同名去重（跨站点合并）只作用于这个分区：短剧各模块同名剧保留集数最多的版本。
+# 欧美影视（film）等其它分区不参与去重，同名影片各自独立展示。
+DEDUP_GROUP = "duanju"
 
 MODULES = {
     "original": {
