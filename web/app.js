@@ -1639,7 +1639,7 @@
             <div class="help">未单独设置时沿用全局默认；也可用环境变量 <code>HUANGGUO_DOWNLOAD_ROOT</code> 指定默认目录（Docker 挂载时用）。</div>
           </div>
           <div class="field"><label>目录模板</label><input type="text" data-setting="folder_template" value="${h(s.folder_template || '{module}/{title} ({year})')}">
-            <div class="help">可用变量：{module} {title} {year} {site_id}。修改后只影响新下载。</div>
+            <div class="help">可用变量：{module} {title} {year} {site_id} {actor}。电影模块自动按演员分目录（模板未写 {actor} 时插入）。修改后只影响新下载。</div>
           </div>
           <div class="field"><label>默认画质</label>
             <select data-setting="quality">

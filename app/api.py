@@ -1139,6 +1139,55 @@ _nfo_rebuild = {
 _nfo_rebuild_lock = threading.Lock()
 
 
+def _migrate_to_actor_folder(folder: Path, episodes: list, drama_id: int, root: Path) -> None:
+    """把旧结构目录里的已下载内容搬进新目录（演员目录），并回写分集路径。"""
+    done_eps = [e for e in episodes if e.get("state") == "done" and e.get("file_path")]
+    if not done_eps:
+        return
+    old_folder = Path(str(done_eps[0]["file_path"])).parent
+    try:
+        old_resolved = old_folder.resolve()
+        root_resolved = root.resolve()
+    except OSError:
+        return
+    if not str(old_resolved).startswith(str(root_resolved)) or old_resolved == root_resolved:
+        return
+    if old_resolved == folder.resolve():
+        return
+    if any(old_resolved == p.resolve() for p in folder.parents):
+        return  # 旧目录是新目录的祖先：避免自我嵌套
+    if not old_resolved.exists():
+        return
+    folder.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if not folder.exists():
+            # 整目录搬迁（视频 + 刮削文件一起）
+            shutil.move(str(old_resolved), str(folder))
+        else:
+            # 目标已有内容（例如上次重建先生成了刮削文件）：把旧目录里
+            # 目标缺少的文件搬过去（视频等），随后整个清除旧目录——
+            # 新目录会重新生成全部刮削文件，旧的都是过期副本
+            for item in old_resolved.iterdir():
+                target = folder / item.name
+                if target.exists():
+                    continue
+                try:
+                    shutil.move(str(item), str(target))
+                except OSError:
+                    continue
+            shutil.rmtree(old_resolved, ignore_errors=True)
+    except OSError:
+        return
+    for episode in done_eps:
+        name = Path(str(episode["file_path"])).name
+        new_path = folder / name
+        if new_path.exists():
+            db.set_episode_state(
+                drama_id, int(episode["ep"]), "done", str(new_path),
+                int(episode.get("file_size") or 0),
+            )
+
+
 def _run_nfo_rebuild(ids: list[int]) -> None:
     global _nfo_rebuild
     rebuilt = 0
@@ -1149,7 +1198,12 @@ def _run_nfo_rebuild(ids: list[int]) -> None:
             if not detail or not detail.get("cover_path"):
                 continue
             try:
+                group = module_group(str(detail.get("module") or ""))
+                root = settings.root_for(group)
                 folder = nfo.show_folder(settings, detail)
+                episodes = detail.get("episodes") or []
+                # 先迁移目录（旧结构 → 演员目录），再生成刮削文件
+                _migrate_to_actor_folder(folder, episodes, drama_id, root)
                 folder.mkdir(parents=True, exist_ok=True)
                 # 清理旧产物：poster / fanart 全部重生成；电影模式删掉
                 # 旧的 movie.nfo（新命名与视频同名）
@@ -1157,7 +1211,6 @@ def _run_nfo_rebuild(ids: list[int]) -> None:
                     (folder / name).unlink(missing_ok=True)
                 if nfo.is_movie(detail):
                     (folder / "movie.nfo").unlink(missing_ok=True)
-                episodes = detail.get("episodes") or []
                 nfo.write_art(settings, detail, force=True)
                 nfo.write_show_nfo(settings, detail, episodes)
                 for episode in episodes:

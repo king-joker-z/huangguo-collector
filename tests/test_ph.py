@@ -665,6 +665,51 @@ class MovieScrapeTests(PhBase):
         self.assertFalse((folder / "movie.nfo").exists())  # 旧命名已清理
         self.assertTrue((folder / "Force Rebuild (2026).nfo").exists())
 
+    def test_show_folder_actor_directory(self):
+        """电影模块默认按演员分目录；兼容原始行的 actors_json；可自定义关闭。"""
+        from app import nfo
+
+        root = self.settings.root_for("film")
+        drama = {
+            "module": "ph_creator",
+            "source": "ph",
+            "title": "Movie A",
+            "site_id": "ph_actor1",
+            "year": 2026,
+            "tags_site": [],
+            "actors": [{"name": "798DS", "role": "演员"}],
+        }
+        folder = nfo.show_folder(self.settings, drama)
+        self.assertEqual(
+            folder, root / "博主影片" / "798DS" / "Movie A (2026)"
+        )
+
+        # 原始 row 形式（actors 是 JSON 字符串）同样生效
+        raw = dict(drama)
+        raw.pop("actors")
+        raw["actors_json"] = json.dumps([{"name": "798DS", "role": "演员"}])
+        self.assertEqual(nfo.show_folder(self.settings, raw), folder)
+
+        # author 兜底
+        raw2 = {"module": "ph_creator", "source": "ph", "title": "Movie B",
+                "site_id": "ph_actor2", "year": 2026, "author": "Someone"}
+        folder2 = nfo.show_folder(self.settings, raw2)
+        self.assertEqual(folder2, root / "博主影片" / "Someone" / "Movie B (2026)")
+
+        # 用户自定义模板（不含 {actor}）：电影模块自动插入演员段
+        self.settings.update({"folder_template": "{module}/{title} ({year})"}, group="film")
+        self.assertEqual(
+            nfo.show_folder(self.settings, drama), root / "博主影片" / "798DS" / "Movie A (2026)"
+        )
+
+        # 模板里带 {actor} 但没有演员信息：去掉空段不产生空目录
+        self.settings.update({"folder_template": "{module}/{actor}/{title} ({year})"}, group="film")
+        no_actor = {"module": "ph_creator", "source": "ph", "title": "Movie C",
+                    "site_id": "ph_actor3", "year": 2026}
+        self.assertEqual(
+            nfo.show_folder(self.settings, no_actor), root / "博主影片" / "Movie C (2026)"
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

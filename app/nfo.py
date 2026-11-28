@@ -1,6 +1,7 @@
 """Emby / Jellyfin / Kodi 电视剧刮削所需的目录、NFO 与海报。"""
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -64,18 +65,48 @@ def media_title(drama: dict) -> str:
     return title
 
 
+def folder_actor(drama: dict) -> str:
+    """目录用的演员名：优先 actors[].name（兼容原始行的 actors_json 字符串）。"""
+    actors = drama.get("actors")
+    if not actors:
+        try:
+            actors = json.loads(str(drama.get("actors_json") or "[]"))
+        except Exception:
+            actors = []
+    for actor in actors or []:
+        if isinstance(actor, dict):
+            name = str(actor.get("name") or "").strip()
+            if name:
+                return safe_name(name)
+    author = str(drama.get("author") or "").strip()
+    return safe_name(author) if author else ""
+
+
 def show_folder(settings: Settings, drama: dict) -> Path:
     module_label = MODULES.get(drama.get("module", ""), {}).get("label", drama.get("module", ""))
     group = module_group(str(drama.get("module") or ""))
     title = media_title(drama)
     year = drama_year(drama)
-    template = settings.get("folder_template", group=group) or "{module}/{title} ({year})"
+    default_tpl = "{module}/{title} ({year})"
+    template = settings.get("folder_template", group=group) or default_tpl
+    actor = folder_actor(drama)
+    # 电影模块（欧美影视）按演员分目录：模板未显式包含 {actor} 时自动
+    # 插入到 {module} 之后（设置页保存过模板也依然生效）
+    if is_movie(drama) and "{actor}" not in template:
+        if "{module}/" in template:
+            template = template.replace("{module}/", "{module}/{actor}/", 1)
+        else:
+            template = "{module}/{actor}/" + template
+    if "{actor}" in template and not actor:
+        # 无演员信息时去掉该段，避免空目录
+        template = template.replace("{actor}/", "").replace("/{actor}", "")
     try:
         rel = template.format(
             module=module_label,
             title=title,
             year=year or "",
             site_id=drama.get("site_id", ""),
+            actor=actor,
         )
     except (KeyError, ValueError):
         rel = f"{module_label}/{title} ({year})" if year else f"{module_label}/{title}"

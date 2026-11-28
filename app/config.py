@@ -7,7 +7,7 @@ from pathlib import Path
 APP_DIR = Path(__file__).resolve().parent
 ROOT_DIR = APP_DIR.parent
 WEB_DIR = ROOT_DIR / "web"
-VERSION = "1.11.2"
+VERSION = "1.11.3"
 DATA_DIR = Path(os.environ.get("HUANGGUO_DATA_DIR") or (ROOT_DIR / "data")).expanduser()
 COVERS_DIR = DATA_DIR / "covers"
 EPISODE_COVERS_DIR = COVERS_DIR / "episodes"
@@ -153,6 +153,7 @@ def env_flag(name: str, default: bool = False) -> bool:
     if v is None:
         return default
     return v.strip().lower() in {"1", "true", "yes", "on"}
+
 
 
 
