@@ -595,7 +595,7 @@ class ScanFlowTests(PhBase):
 
 
 class MovieScrapeTests(PhBase):
-    """电影模式 NFO：演员头像进 actors/，横版封面生成 2:3 海报。"""
+    """电影模式：横版 poster 原样保留、NFO 与视频同名、演员头像进 actors/。"""
 
     def test_movie_nfo_with_actor_thumb_and_landscape_poster(self):
         from app import nfo
@@ -621,10 +621,12 @@ class MovieScrapeTests(PhBase):
         poster = nfo.show_folder(self.settings, drama) / "poster.jpg"
         self.assertTrue(poster.exists())
         with Image.open(poster) as image:
-            self.assertEqual(image.size, (600, 900))  # 横版封面 → 2:3 海报
+            # 电影模块：poster 保留横版原样，不再转 2:3
+            self.assertEqual(image.size, (640, 360))
 
         path = nfo.write_show_nfo(self.settings, drama, [])
-        self.assertEqual(path.name, "movie.nfo")
+        # NFO 与视频同名（Emby 电影惯例），不再用 movie.nfo
+        self.assertEqual(path.name, "业余金发 (2025).nfo")
         text = path.read_text(encoding="utf-8")
         self.assertIn("<movie>", text)
         self.assertIn("<title>业余金发</title>", text)
@@ -634,6 +636,34 @@ class MovieScrapeTests(PhBase):
         self.assertTrue((path.parent / "actors").is_dir())
         self.assertIn("<thumb>actors/", text)
         self.assertIn("欧美影视", text)
+
+    def test_write_art_force_regenerates_and_cleans_legacy(self):
+        from app import nfo
+
+        cover = self.root / "cover2.jpg"
+        Image.new("RGB", (640, 360), (10, 60, 120)).save(cover, "JPEG")
+        drama = {
+            "module": "ph_creator",
+            "source": "ph",
+            "title": "Force Rebuild",
+            "site_id": "ph_force1",
+            "year": 2026,
+            "tags_site": [],
+            "actors": [],
+            "cover_path": str(cover),
+        }
+        folder = nfo.show_folder(self.settings, drama)
+        # 模拟历史产物：旧的 2:3 poster + 旧 movie.nfo
+        folder.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (600, 900), (0, 0, 0)).save(folder / "poster.jpg", "JPEG")
+        (folder / "movie.nfo").write_text("<movie>old</movie>", encoding="utf-8")
+
+        nfo.write_art(self.settings, drama, force=True)
+        nfo.write_show_nfo(self.settings, drama, [])
+        with Image.open(folder / "poster.jpg") as image:
+            self.assertEqual(image.size, (640, 360))  # 重建后为横版
+        self.assertFalse((folder / "movie.nfo").exists())  # 旧命名已清理
+        self.assertTrue((folder / "Force Rebuild (2026).nfo").exists())
 
 
 if __name__ == "__main__":

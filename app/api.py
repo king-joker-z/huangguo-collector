@@ -1126,6 +1126,110 @@ def cover_status():
     return ok(covers=covers.status())
 
 
+# --------------------------------------------------------------- nfo rebuild
+_nfo_rebuild = {
+    "state": "idle",
+    "total": 0,
+    "done": 0,
+    "message": "",
+    "errors": [],
+    "started_at": "",
+    "finished_at": "",
+}
+_nfo_rebuild_lock = threading.Lock()
+
+
+def _run_nfo_rebuild(ids: list[int]) -> None:
+    global _nfo_rebuild
+    rebuilt = 0
+    errors: list[str] = []
+    try:
+        for index, drama_id in enumerate(ids, start=1):
+            detail = db.get_drama_detail(drama_id)
+            if not detail or not detail.get("cover_path"):
+                continue
+            try:
+                folder = nfo.show_folder(settings, detail)
+                folder.mkdir(parents=True, exist_ok=True)
+                # 清理旧产物：poster / fanart 全部重生成；电影模式删掉
+                # 旧的 movie.nfo（新命名与视频同名）
+                for name in ("poster.jpg", "fanart.jpg"):
+                    (folder / name).unlink(missing_ok=True)
+                if nfo.is_movie(detail):
+                    (folder / "movie.nfo").unlink(missing_ok=True)
+                episodes = detail.get("episodes") or []
+                nfo.write_art(settings, detail, force=True)
+                nfo.write_show_nfo(settings, detail, episodes)
+                for episode in episodes:
+                    if episode.get("state") == "done":
+                        nfo.write_episode_nfo(settings, detail, episode)
+                rebuilt += 1
+            except Exception as exc:
+                errors.append(f"#{drama_id}: {exc}")
+            with _nfo_rebuild_lock:
+                _nfo_rebuild.update(
+                    done=index,
+                    message=f"重建刮削文件 {index}/{len(ids)}",
+                )
+        with _nfo_rebuild_lock:
+            _nfo_rebuild.update(
+                state="done",
+                message=f"完成：重建 {rebuilt} 部"
+                + (f"，失败 {len(errors)} 部" if errors else ""),
+                errors=errors[-20:],
+                finished_at=now_str(),
+            )
+    except Exception as exc:
+        with _nfo_rebuild_lock:
+            _nfo_rebuild.update(
+                state="error", message=f"重建异常: {exc}", finished_at=now_str()
+            )
+
+
+@router.get("/nfo/rebuild")
+def nfo_rebuild_status():
+    with _nfo_rebuild_lock:
+        return ok(rebuild=dict(_nfo_rebuild))
+
+
+@router.post("/nfo/rebuild")
+def nfo_rebuild_start(payload: dict | None = Body(None)):
+    global _nfo_rebuild
+    payload = payload or {}
+    group = str(payload.get("group") or "")
+    ids = [int(i) for i in (payload.get("ids") or [])]
+    with _nfo_rebuild_lock:
+        if _nfo_rebuild.get("state") == "running":
+            fail("重建任务正在进行中", 409)
+        if not ids:
+            rows = db.query(
+                "SELECT DISTINCT d.id FROM dramas d JOIN episodes e ON e.drama_id=d.id "
+                "WHERE e.state='done' AND d.is_duplicate=0"
+            )
+            ids = [int(r["id"]) for r in rows]
+            if group:
+                allowed = set(modules_in_group(group))
+                ids = [
+                    i for i in ids
+                    if str((db.get_drama(i) or {"module": ""})["module"] or "") in allowed
+                ]
+        if not ids:
+            return ok(rebuild=dict(_nfo_rebuild), message="没有已下载的剧集需要重建")
+        _nfo_rebuild = {
+            "state": "running",
+            "total": len(ids),
+            "done": 0,
+            "message": f"准备重建 {len(ids)} 部",
+            "errors": [],
+            "started_at": now_str(),
+            "finished_at": "",
+        }
+        threading.Thread(
+            target=_run_nfo_rebuild, args=(ids,), name="nfo-rebuild", daemon=True
+        ).start()
+    return ok(rebuild=dict(_nfo_rebuild), message=f"开始重建 {len(ids)} 部的 NFO 与海报")
+
+
 @router.post("/covers/backfill")
 def backfill_covers(payload: dict | None = Body(None)):
     payload = payload or {}

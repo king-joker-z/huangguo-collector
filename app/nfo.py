@@ -115,7 +115,8 @@ def episode_path(settings: Settings, drama: dict, ep: int) -> Path:
 
 def episode_nfo_path(settings: Settings, drama: dict, ep: int) -> Path:
     if is_movie(drama):
-        return show_folder(settings, drama) / "movie.nfo"
+        # 电影模式：NFO 与视频同名（Emby 电影惯例），不再用 movie.nfo
+        return show_folder(settings, drama) / (movie_basename(drama) + ".nfo")
     return season_folder(settings, drama) / (episode_basename(drama, ep) + ".nfo")
 
 
@@ -244,7 +245,7 @@ def _prepare_actors(folder: Path, drama: dict) -> list[dict]:
 
 
 def _write_movie_nfo(settings: Settings, drama: dict, folder: Path) -> Path:
-    """电影模式：单个 <movie> NFO，Emby 放在与视频同名的目录里。"""
+    """电影模式：NFO 与视频同名（Emby 电影惯例），不再是 movie.nfo。"""
     tags = _tags(drama)
     year = drama_year(drama)
     group = module_group(str(drama.get("module") or ""))
@@ -287,8 +288,15 @@ def _write_movie_nfo(settings: Settings, drama: dict, folder: Path) -> Path:
         "  </art>",
         "</movie>",
     ]
-    path = folder / "movie.nfo"
+    path = folder / (movie_basename(drama) + ".nfo")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # 旧版本用 movie.nfo 命名：写新文件时顺手清理，避免 Emby 双重识别
+    legacy = folder / "movie.nfo"
+    if legacy.exists() and legacy != path:
+        try:
+            legacy.unlink()
+        except OSError:
+            pass
     return path
 
 
@@ -413,7 +421,14 @@ def _landscape_poster(cover: Path, target: Path) -> bool:
         return False
 
 
-def write_art(settings: Settings, drama: dict) -> None:
+def write_art(settings: Settings, drama: dict, force: bool = False) -> None:
+    """生成 poster.jpg / fanart.jpg。
+
+    - 电影模块（欧美影视）：poster 保留站点原始横版封面（16:9），
+      Emby 电影库支持横版海报；fanart 为 16:9 模糊背景。
+    - 剧集模块：竖版直接复制；横版转 2:3（电视剧库海报惯例）。
+    - ``force=True`` 时无视已有文件强制重建（一键重建历史条目用）。
+    """
     folder = show_folder(settings, drama)
     folder.mkdir(parents=True, exist_ok=True)
     cover = Path(str(drama.get("cover_path") or ""))
@@ -424,23 +439,37 @@ def write_art(settings: Settings, drama: dict) -> None:
     if not cover.exists():
         return
     poster = folder / "poster.jpg"
-    if not poster.exists():
+    if force or not poster.exists():
         done = False
-        try:
-            with Image.open(cover) as image:
-                landscape = image.width > image.height
-            if landscape:
-                # 横版封面（影视站常见）：转成 Emby 标准 2:3 海报
-                done = _landscape_poster(cover, poster)
-        except Exception:
-            done = False
+        if is_movie(drama):
+            # 电影：poster 就是横版封面本身
+            try:
+                shutil.copyfile(cover, poster)
+                done = True
+            except OSError:
+                done = False
+        else:
+            try:
+                with Image.open(cover) as image:
+                    landscape = image.width > image.height
+                if landscape:
+                    # 横版封面（影视站常见）：转成 2:3 海报
+                    done = _landscape_poster(cover, poster)
+            except Exception:
+                done = False
         if not done:
             try:
                 shutil.copyfile(cover, poster)
             except OSError:
                 pass
-    if not settings.get_bool("write_fanart", True, group=module_group(str(drama.get("module") or ""))):
+    if not force and not settings.get_bool("write_fanart", True, group=module_group(str(drama.get("module") or ""))):
         return
+    if force:
+        fanart = folder / "fanart.jpg"
+        try:
+            fanart.unlink(missing_ok=True)
+        except OSError:
+            pass
     fanart = folder / "fanart.jpg"
     if fanart.exists():
         return

@@ -223,10 +223,11 @@ class MovieModeTests(unittest.TestCase):
             path = nfo.episode_path(self.settings, drama, 1)
             self.assertEqual(path.parent, folder)
             self.assertEqual(path.name, "示例电影 (2026).mp4")
-            self.assertEqual(nfo.episode_nfo_path(self.settings, drama, 1), folder / "movie.nfo")
+            # 电影 NFO 与视频同名（Emby 电影惯例）
+            self.assertEqual(nfo.episode_nfo_path(self.settings, drama, 1), folder / "示例电影 (2026).nfo")
 
             info = nfo.write_show_nfo(self.settings, drama, [])
-            self.assertEqual(info.name, "movie.nfo")
+            self.assertEqual(info.name, "示例电影 (2026).nfo")
             text = info.read_text(encoding="utf-8")
             self.assertIn("<movie>", text)
             self.assertIn("<title>示例电影</title>", text)

@@ -340,6 +340,8 @@ body.modal-open { overflow: hidden; }
 
 /* -------------------------------------------------------------------- grid */
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(258px, 1fr)); gap: 14px; }
+/* 电影模块（欧美影视）：横版卡片网格，列更宽卡片更大 */
+.grid.movie { grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); }
 .empty { grid-column: 1 / -1; text-align: center; color: var(--dim); padding: 90px 0 50px; }
 .empty .glyph { font-size: 34px; opacity: .28; margin-bottom: 10px; }
 .empty h3 { margin: 0 0 6px; font-size: 15px; color: var(--muted); font-weight: 500; }
@@ -356,6 +358,10 @@ body.modal-open { overflow: hidden; }
 .card .cover { position: relative; width: 100%; aspect-ratio: 3 / 4; background: #0f1218; overflow: hidden; }
 .card .cover img { position: relative; z-index: 1; width: 100%; height: 100%; object-fit: cover; transition: transform .45s, opacity .2s; }
 .card:hover .cover img { transform: scale(1.035); }
+/* 电影模块（欧美影视）：横版封面卡片，角标在封面下方不遮挡 */
+.card.movie .cover { aspect-ratio: 16 / 9; }
+.card.movie .cover::after { content: none; }
+.card-badges { display: flex; align-items: center; gap: 5px; margin-bottom: 7px; flex-wrap: wrap; }
 .card .cover .ph {
   position: absolute; inset: 0; z-index: 0; display: grid; place-items: center;
   color: #3a4152; font-weight: 800; font-size: 38px; letter-spacing: 2px;
@@ -518,6 +524,10 @@ body.modal-open { overflow: hidden; }
 .detail-cover .score { position: absolute; top: 10px; right: 10px; height: 26px; padding: 0 9px; border-radius: 6px; background: rgba(4,5,8,.72); backdrop-filter: blur(6px); color: var(--warn); font-size: 13px; font-weight: 700; display: inline-flex; align-items: center; gap: 2px; }
 .detail-cover .score span { color: var(--dim); font-size: 9px; font-weight: 500; }
 .detail-cover .cbadge { position: absolute; left: 10px; top: 10px; height: 23px; font-size: 10px; }
+/* 电影模块：封面为全宽横版横幅，信息区在其下 */
+.detail-hero-movie { grid-template-columns: minmax(0, 1fr) 280px; }
+.detail-cover.movie { grid-column: 1 / -1; aspect-ratio: 16 / 9; width: 100%; }
+.detail-cover.movie .ph { font-size: 44px; }
 .detail-info { min-width: 0; padding-top: 2px; }
 .detail-kicker { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; margin-bottom: 6px; flex-wrap: wrap; }
 .detail-kicker .pill { height: 22px; padding: 0 8px; display: inline-flex; align-items: center; border-radius: 5px; background: var(--panel2); border: 1px solid var(--line2); font-size: 11px; color: #b8bfcd; }

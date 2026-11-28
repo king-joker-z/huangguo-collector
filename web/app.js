@@ -571,8 +571,11 @@
     const empty = totalInLibrary > 0
       ? emptyHTML('没有符合条件的剧集', '试试清空搜索或筛选条件。', '清除筛选', 'clear-all')
       : onboardingHTML();
+    // 电影模块（欧美影视）：横版卡片网格，列更宽
+    const movieGrid = state.items.length > 0
+      && state.items.every((item) => moduleMediaType(item.module) === 'movie');
     view.innerHTML = `${totalInLibrary > 0 ? toolbarHTML() + activeFiltersHTML() : ''}
-      ${state.items.length ? `<div class="grid ${state.selectMode ? 'selecting' : ''}">${state.items.map(cardHTML).join('')}</div>` : empty}
+      ${state.items.length ? `<div class="grid ${state.selectMode ? 'selecting' : ''} ${movieGrid ? 'movie' : ''}">${state.items.map(cardHTML).join('')}</div>` : empty}
       ${state.items.length ? pagerHTML() : ''}`;
     syncSelectionDOM();
   }
@@ -668,7 +671,17 @@
     const complete = total > 0 && done >= total;
     const dlLabel = item.has_update ? '补下更新' : complete ? '已下载' : done > 0 ? '继续下载' : '下载整部';
     const moduleText = ((item.module_labels && item.module_labels.length) ? item.module_labels : [item.module_label || moduleLabel(item.module)]).join(' · ');
-    return `<article class="card ${selected ? 'sel' : ''}" data-id="${item.id}">
+    const isMovie = moduleMediaType(item.module) === 'movie';
+    // 电影卡片：模块/集数角标移到封面下方（不遮住横版封面）
+    const badges = isMovie
+      ? `<div class="card-badges"><span class="cbadge module ${item.module}">${h(moduleText)}</span><span class="cbadge ep">${total ? `全 ${total} 集` : '待同步'}</span></div>`
+      : '';
+    const coverBadges = isMovie ? '' : `
+        <div class="cover-bottom">
+          <span class="cbadge module ${item.module}">${h(moduleText)}</span>
+          <span class="cbadge ep">${total ? `全 ${total} 集` : '待同步'}</span>
+        </div>`;
+    return `<article class="card ${isMovie ? 'movie' : ''} ${selected ? 'sel' : ''}" data-id="${item.id}">
       <div class="cover">
         ${coverHTML(item)}
         <div class="cover-top">
@@ -677,12 +690,10 @@
         </div>
         <div class="check" data-action="toggle-select" data-id="${item.id}"></div>
         ${item.has_update ? '<span class="update-ribbon">有更新</span>' : ''}
-        <div class="cover-bottom">
-          <span class="cbadge module ${item.module}">${h(moduleText)}</span>
-          <span class="cbadge ep">${total ? `全 ${total} 集` : '待同步'}</span>
-        </div>
+        ${coverBadges}
       </div>
       <div class="body">
+        ${badges}
         <h3 class="title" title="${h(item.title)}">${h(item.title)}</h3>
         <div class="meta">
           ${date ? `<span>${h(date)}</span>` : ''}
@@ -836,8 +847,8 @@
         <a href="#/drama/${d.duplicate_preferred.id}">${h(d.duplicate_preferred.title)}（${d.duplicate_preferred.total_ep} 集）</a>
         ，当前条目已从媒体库隐藏，文件不会删除。</div>` : ''}
       ${d.tag_excluded ? '<div class="merge-banner">该剧含有已排除的标签，已从媒体库/更新/订阅中隐藏；在「标签管理」里恢复标签后会重新显示。</div>' : ''}
-      <div class="detail-hero">
-        <div class="detail-cover">
+      <div class="detail-hero ${moduleMediaType(d.module) === 'movie' ? 'detail-hero-movie' : ''}">
+        <div class="detail-cover ${moduleMediaType(d.module) === 'movie' ? 'movie' : ''}">
           ${coverHTML(d)}
           <span class="cbadge module ${d.module}">${h(moduleText)}</span>
           ${d.score ? `<div class="score">${Number(d.score).toFixed(1)}<span>分</span></div>` : ''}
@@ -938,7 +949,7 @@
       </div>
 
       <div class="scrape-panel">
-        <div class="txt">已完成分集自动生成 <b>${moduleMediaType(d.module) === 'movie' ? 'movie.nfo' : 'tvshow.nfo'}</b>、<b>poster.jpg</b>、<b>fanart.jpg</b> 与分集 NFO。<br>目录：<code>${h(d.folder)}</code></div>
+        <div class="txt">已完成分集自动生成 <b>${moduleMediaType(d.module) === 'movie' ? '与视频同名的 .nfo' : 'tvshow.nfo'}</b>、<b>poster.jpg</b>、<b>fanart.jpg</b> 与分集 NFO。<br>目录：<code>${h(d.folder)}</code></div>
         <div class="btns"><button class="btn sm" data-action="detail-nfo">刷新 NFO</button><button class="btn sm" data-action="detail-folder">打开文件夹</button></div>
       </div>`;
     updateEpSelection();
@@ -1681,8 +1692,12 @@
           </div>
           <div class="panel" style="margin-top:14px">
             <h2>媒体维护</h2>
-            <p class="hint">为已下载但缺少封面的分集抽帧生成 <code>-thumb.jpg</code>。</p>
-            <button class="btn sm" data-action="all-covers">补全全部已下载集封面</button>
+            <p class="hint">重建会用当前规则重新生成已下载内容的 NFO 与海报（电影：横版 poster + 与视频同名的 NFO）。</p>
+            <div style="display:flex;gap:6px;flex-wrap:wrap">
+              <button class="btn sm pri" data-action="nfo-rebuild">一键重建 NFO / 海报（已下载）</button>
+              <button class="btn sm" data-action="all-covers">补全全部已下载集封面</button>
+            </div>
+            <div class="hint" id="nfo-rebuild-status"></div>
           </div>
           <div class="panel" style="margin-top:14px;color:var(--dim);font-size:11px;line-height:1.8">
             本地采集器，仅用于个人媒体库整理。请遵守站点条款与当地法律法规，不要公开传播下载内容。
@@ -2625,6 +2640,31 @@
         const plot = $('#detail-plot');
         const clamped = plot.classList.toggle('clamped');
         el.textContent = clamped ? '展开简介' : '收起简介';
+        break;
+      }
+      case 'nfo-rebuild': {
+        el.disabled = true;
+        const status = $('#nfo-rebuild-status');
+        if (status) status.textContent = '正在准备重建…';
+        try {
+          const res = await api(gurl('/nfo/rebuild'), { method: 'POST', body: { group: state.group } });
+          toast(res.message || '重建已开始', 'ok');
+          const poll = setInterval(async () => {
+            try {
+              const st = (await api(gurl('/nfo/rebuild'))).rebuild;
+              if (status) status.textContent = st.message || '';
+              if (st.state !== 'running') {
+                clearInterval(poll);
+                el.disabled = false;
+                toast(st.message || '重建完成', st.state === 'error' ? 'err' : 'ok');
+              }
+            } catch (_) { clearInterval(poll); el.disabled = false; }
+          }, 2000);
+        } catch (err) {
+          if (status) status.textContent = err.message;
+          toast(err.message, 'err');
+          el.disabled = false;
+        }
         break;
       }
       case 'translate-all': {
