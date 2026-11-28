@@ -8,6 +8,7 @@ from datetime import datetime
 
 from .actors import ensure_avatars
 from .config import MODULES, module_group
+from .creators import skip_short_video
 from .db import Database, now_str
 from .groupctx import reset_group, set_group
 from .scraper import Scraper, ScrapeError
@@ -344,6 +345,9 @@ class ScanManager:
         # 欧美影视：演员订阅（博主）驱动自动下载
         creator = self._creator_sub_for(row)
         if not creator or not creator.get("enabled") or not creator.get("auto_download"):
+            return
+        # 低于「自动下载最短时长」的影片跳过；手动下载不受影响
+        if skip_short_video(self.settings, int(row["duration"] or 0)):
             return
         quality = str(creator.get("quality") or "") or self.settings.get("quality", group=drama_group)
         result = self.downloads.enqueue_new(drama_id, quality)

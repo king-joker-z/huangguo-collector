@@ -21,6 +21,11 @@ class FakeScheduler:
     active_schedule_id = None
 
 
+class FakeCreators:
+    def add_video(self, url):
+        return 42, True, "已添加影片「测试影片」"
+
+
 class ApiGroupContractTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -42,6 +47,7 @@ class ApiGroupContractTests(unittest.TestCase):
             mock.patch.object(api, "translator", self.translator),
             mock.patch.object(api, "title_translate", self.title_translate),
             mock.patch.object(api, "scheduler", FakeScheduler()),
+            mock.patch.object(api, "creators", FakeCreators()),
         ]
         for patcher in self.patches:
             patcher.start()
@@ -92,6 +98,19 @@ class ApiGroupContractTests(unittest.TestCase):
         activity = api.activity(group="duanju")
         self.assertEqual(activity["stats"]["group"], "duanju")
         self.assertEqual(activity["summary"]["queued"], 0)
+
+    def test_film_video_add_accepts_url(self):
+        res = api.film_video_add({"url": "https://example/view_video.php?viewkey=ph123"})
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["drama_id"], 42)
+        self.assertTrue(res["created"])
+        self.assertIn("已添加影片", res["message"])
+
+    def test_film_video_add_requires_url(self):
+        from fastapi import HTTPException
+
+        with self.assertRaises(HTTPException):
+            api.film_video_add({"url": ""})
 
 
 if __name__ == "__main__":

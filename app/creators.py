@@ -5,17 +5,40 @@
 ``ph_creator`` 模块的一个列表，翻页全部采集，新影片自动入库。
 
 订阅开启了 auto_download 时，扫描发现的新影片会自动加入下载队列
-（scan.ScanManager._auto_download 联动）。
+（scan.ScanManager._auto_download 联动）；低于「自动下载最短时长」的影片
+（设置 ph_min_duration，默认 1 分钟）自动跳过，手动下载不受影响。
+
+单个影片：``add_video`` 支持只粘贴一个视频详情页地址，直接入库并下载，
+不需要订阅整个博主。
 """
 from __future__ import annotations
 
-from .actors import download_avatar
+import re
+from urllib.parse import urljoin
+
+from .actors import download_avatar, ensure_avatars
+from .adapters.ph import VIEWKEY_RE, duration_to_seconds
 from .db import Database
 from .scraper import ScrapeError
 from .settings import Settings
 
 SOURCE_KEY = "ph"
 QUALITIES = ("", "hevc", "h264", "720p")
+
+
+def skip_short_video(settings: Settings, duration_seconds: int) -> bool:
+    """欧美影视自动下载的时长过滤：低于最短时长（分钟，默认 1）时跳过。
+
+    时长未知（<=0）时不拦截，避免因抓不到时长漏掉正常影片；
+    设置 0 表示不过滤。手动下载（单部/批量点选）不走这个判断。
+    """
+    minutes = settings.get_float("ph_min_duration", 1.0, group="film")
+    if minutes <= 0:
+        return False
+    seconds = int(duration_seconds or 0)
+    if seconds <= 0:
+        return False
+    return seconds < minutes * 60
 
 
 class CreatorManager:
@@ -96,6 +119,71 @@ class CreatorManager:
         item = self.db.get_creator_sub(creator_id) or {}
         item.update(self.db.creator_video_stats(SOURCE_KEY, info["key"]))
         return item, warning
+
+    # ---------------------------------------------------------------- add video
+    def add_video(self, url: str) -> tuple[int, bool, str]:
+        """按视频详情页地址添加单部影片（无需订阅博主）。
+
+        返回 ``(drama_id, created, message)``；已在库里时直接返回现有条目，
+        created=False。添加后由前端调用下载接口选择画质下载。
+        """
+        scraper = self._scraper()
+        text = str(url or "").strip()
+        if not text:
+            raise ScrapeError("影片地址不能为空")
+        match = VIEWKEY_RE.search(text)
+        if match:
+            viewkey = match.group(1)
+            if not text.startswith(("http://", "https://")):
+                text = urljoin(scraper.site_base + "/", text.lstrip("/"))
+            video_url = text
+        elif re.fullmatch(r"[A-Za-z0-9_-]{4,}", text):
+            viewkey = text
+            video_url = ""
+        else:
+            raise ScrapeError("无法识别视频地址：请粘贴视频详情页链接（链接里需包含 viewkey=）")
+
+        site_id = scraper._sid(viewkey)
+        existing = self.db.get_drama_by_site_id(site_id)
+        if existing is not None:
+            return int(existing["id"]), False, "影片已在媒体库中"
+        if not video_url:
+            video_url = f"{scraper.site_base}/view_video.php?viewkey={scraper.raw_id(site_id)}"
+
+        detail = scraper.fetch_detail(site_id, url=video_url)
+        try:
+            ensure_avatars(scraper, detail)
+        except Exception:
+            pass
+        duration = int(detail.get("duration") or 0) or duration_to_seconds(
+            detail.get("duration_text") or ""
+        )
+        title = str(detail.get("title") or "").strip() or f"viewkey {scraper.raw_id(site_id)}"
+        card = {
+            "site_id": site_id,
+            "source": SOURCE_KEY,
+            "module": "ph_creator",
+            "title": title,
+            "url": video_url,
+            "cover_url": detail.get("cover_url") or "",
+            "score": detail.get("score"),
+            "total_ep": 1,
+            "views": detail.get("views") or "",
+            "tags": detail.get("tags") or [],
+            "badges": [],
+            "duration": duration,
+            "duration_text": detail.get("duration_text") or "",
+        }
+        drama_id, _, _ = self.db.upsert_card(card)
+        try:
+            self.db.apply_detail(site_id, detail)
+        except KeyError:
+            pass
+        try:
+            scraper.save_cover(site_id, detail.get("cover_url") or "")
+        except Exception:
+            pass
+        return int(drama_id), True, f"已添加影片「{title}」"
 
     # ------------------------------------------------------------------ update
     def update(self, creator_id: int, **fields) -> dict:

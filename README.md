@@ -5,6 +5,7 @@
 - 直观的 Web 媒体库（深色界面，卡片式浏览、搜索、筛选、分页）
 - 分区导航：短剧 / 欧美影视 双入口，媒体库、模块与采集入口互相独立，后续可继续加分区
 - **演员订阅（欧美影视）**：粘贴博主页地址即可订阅，头像 / 名称自动抓取，扫描遍历全部翻页，新影片自动下载
+- **单个影片下载（欧美影视）**：粘贴一个视频详情页地址即可只入库并下载这一部，不必订阅整个博主；自动下载可按最短时长过滤（默认 1 分钟，可调）
 - 标题翻译开关（免费 Google 翻译），并按 Emby 规范写入译名 / 原文 / 演员头像
 - 一键下载整部剧 / 只下载新增分集 / 分批下载
 - 批量订阅 / 取消订阅，批量忽略更新、补封面、同步详情、收藏
@@ -38,6 +39,16 @@
 - **详情页**：封面、评分、题材、简介、下载进度、体积估算、分集网格、NFO 操作；桌面 3 栏，窄屏自动折叠。
 
 > 仅用于个人媒体库整理。内容为成人向 AI 短剧（18+），请遵守站点条款与当地法律法规，不要公开传播。
+
+## 1.11.5 单个影片下载 + 自动下载时长过滤
+
+- **单个视频下载（欧美影视）**：演员订阅页新增「＋ 单个影片」，粘贴视频详情页链接（含 `viewkey=`）即可只入库并下载这一部影片，不需要订阅整个博主；已入库时会直接复用现有条目。
+- 添加后弹出画质选择对话框（HEVC / H264 / 720P），与媒体库卡片「下载影片」走同一条下载链路，自动刮削为 Emby 电影。
+- **自动下载时长过滤**：设置 → 欧美影视站点新增「自动下载最短时长（分钟）」，默认 1 分钟、可调整（0 = 不过滤）；低于下限的影片只入库不自动下载。
+- 过滤只作用于「演员订阅自动下载」和「下载全部未完成」；手动点「下载影片」、单视频添加不受限制。时长未知时不拦截。
+- 影片新增 `duration`（秒）持久化：列表卡片先写入、详情页时长优先；老库启动时用分集时长自动回填，历史影片同样受过滤约束。
+- 欧美影视卡片显示片长，下载按钮文案改为「下载影片」。
+- 81 个单测全部通过。
 
 ## 1.11.4 去重仅限短剧分区
 
@@ -516,12 +527,12 @@ huangguo-collector/
 
 镜像已发布到 Docker Hub（`linux/amd64`，适配 Z4 Pro）：
 
-- **镜像**：`jokermelove/huangguo-collector:1.11.4`（另有 `latest`）
+- **镜像**：`jokermelove/huangguo-collector:1.11.5`（另有 `latest`）
 - **GitHub**：<https://github.com/king-joker-z/huangguo-collector>
 - **Actions**：推送到 `main` 自动构建并推送 Docker Hub，也可在 Actions 页手动 `Run workflow`
 
 ```sh
-docker pull jokermelove/huangguo-collector:1.11.4
+docker pull jokermelove/huangguo-collector:1.11.5
 ```
 
 ### 方式 A：极空间直接拉取镜像（推荐）
@@ -547,7 +558,7 @@ docker compose -f docker-compose.zspace.yml up -d
 本机有 Docker 时：
 
 ```sh
-docker build --platform linux/amd64 -t jokermelove/huangguo-collector:1.11.4 .
+docker build --platform linux/amd64 -t jokermelove/huangguo-collector:1.11.5 .
 # 或
 docker compose up -d --build
 ```
@@ -593,6 +604,7 @@ docker exec huangguo-collector df -h /data /downloads
 ## 13. 免责声明
 
 本项目只做本地采集与媒体库整理，不托管、不分发任何内容。请自行确认内容合法性、年龄限制与站点服务条款；因使用产生的任何后果由使用者承担。
+
 
 
 

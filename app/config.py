@@ -7,7 +7,7 @@ from pathlib import Path
 APP_DIR = Path(__file__).resolve().parent
 ROOT_DIR = APP_DIR.parent
 WEB_DIR = ROOT_DIR / "web"
-VERSION = "1.11.4"
+VERSION = "1.11.5"
 DATA_DIR = Path(os.environ.get("HUANGGUO_DATA_DIR") or (ROOT_DIR / "data")).expanduser()
 COVERS_DIR = DATA_DIR / "covers"
 EPISODE_COVERS_DIR = COVERS_DIR / "episodes"
@@ -144,6 +144,7 @@ DEFAULT_SETTINGS = {
     "translate_target": "zh-CN",  # 目标语言
     "ph_base": "",                # 欧美影视站点根地址，如 https://www.pornhub.com
     "ph_max_pages": "0",          # 每个博主单次采集的翻页上限，0 = 全部
+    "ph_min_duration": "1",       # 欧美影视自动下载最短时长（分钟），0 = 不过滤
 }
 
 

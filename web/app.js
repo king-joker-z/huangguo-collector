@@ -672,9 +672,9 @@
     const date = item.premiered || (item.year ? String(item.year) : '');
     const scope = item.has_update ? 'new' : 'all';
     const complete = total > 0 && done >= total;
-    const dlLabel = item.has_update ? '补下更新' : complete ? '已下载' : done > 0 ? '继续下载' : '下载整部';
     const moduleText = ((item.module_labels && item.module_labels.length) ? item.module_labels : [item.module_label || moduleLabel(item.module)]).join(' · ');
     const isMovie = moduleMediaType(item.module) === 'movie';
+    const dlLabel = item.has_update ? '补下更新' : complete ? '已下载' : done > 0 ? '继续下载' : (isMovie ? '下载影片' : '下载整部');
     // 电影卡片：模块/集数角标移到封面下方（不遮住横版封面）
     const badges = isMovie
       ? `<div class="card-badges"><span class="cbadge module ${item.module}">${h(moduleText)}</span><span class="cbadge ep">${total ? `全 ${total} 集` : '待同步'}</span></div>`
@@ -701,6 +701,7 @@
         <div class="meta">
           ${date ? `<span>${h(date)}</span>` : ''}
           ${item.views ? `<span>${h(item.views)} 播放</span>` : ''}
+          ${isMovie && item.duration_text ? `<span>${h(item.duration_text)}</span>` : ''}
           <span class="${stateCls}">${h(downloadStateText(item))}</span>
         </div>
         <div class="chips">${chips}</div>
@@ -1202,10 +1203,11 @@
       const done = state.creators.reduce((sum, c) => sum + (c.done || 0), 0);
       const baseOk = !!res.base;
       $('#view').innerHTML = `
-        <div class="page-head"><h1>演员订阅</h1><p>订阅博主主页，扫描遍历全部翻页；新影片自动下载并刮削为 Emby 电影</p>
+        <div class="page-head"><h1>演员订阅</h1><p>订阅博主主页，扫描遍历全部翻页；新影片自动下载并刮削为 Emby 电影。也可以只粘贴一个视频地址，下载单部影片。</p>
           <div class="right">
             <button class="btn sm" data-action="creator-download-all">下载全部未完成</button>
             <button class="btn sm" data-action="open-scan">扫描全部博主</button>
+            <button class="btn" data-action="video-add">＋ 单个影片</button>
             <button class="btn pri" data-action="creator-add">＋ 添加博主</button>
           </div></div>
         <div class="creator-summary">
@@ -1268,6 +1270,36 @@
         </div>
       </div>
     </div>`;
+  }
+
+  function openVideoAddModal() {
+    const modal = openModal(`
+      ${modalHead('添加单个影片')}
+      <div class="mbody">
+        <div class="field"><label>影片详情页地址</label>
+          <input id="video-url" type="text" placeholder="https://站点/view_video.php?viewkey=…">
+          <div class="help">粘贴视频页链接（链接里需含 viewkey=）。只入库这一部影片，不需要订阅整个博主；添加后可直接选画质下载。</div>
+        </div>
+        <div class="scan-note" style="margin-top:12px">「自动下载最短时长」只拦截后台自动下载，手动添加/下载不受限制。</div>
+      </div>
+      <div class="mfoot"><button class="btn ghost" data-close>取消</button><button class="btn pri" id="video-save">添加影片</button></div>
+    `);
+    modal.q('#video-save').addEventListener('click', async () => {
+      const url = modal.q('#video-url').value.trim();
+      if (!url) { toast('请填写影片地址', 'err'); return; }
+      modal.q('#video-save').disabled = true;
+      try {
+        const res = await api('/film/video', { method: 'POST', body: { url } });
+        modal.close();
+        toast(res.message || '已添加影片', 'ok');
+        loadStats();
+        if (state.route.name === 'creators') renderCreatorsView();
+        if (res.drama_id) openDownloadDialog([res.drama_id]);
+      } catch (err) {
+        modal.q('#video-save').disabled = false;
+        toast(err.message, 'err');
+      }
+    });
   }
 
   function openCreatorAddModal() {
@@ -1626,9 +1658,13 @@
             <label>每位博主页数上限（0 = 全部）</label>
             <input type="number" min="0" data-setting="ph_max_pages" value="${h(s.ph_max_pages || '0')}">
           </div>
+          <div class="fieldbox">
+            <label>自动下载最短时长（分钟）</label>
+            <input type="number" min="0" step="0.5" data-setting="ph_min_duration" value="${h(s.ph_min_duration || '1')}">
+          </div>
           <div class="fieldbox" style="flex:1;min-width:200px">
             <label>说明</label>
-            <div class="help" style="line-height:34px">视频多的博主可限制单次采集页数；单个博主还能在演员订阅里单独设置。</div>
+            <div class="help" style="line-height:34px">低于该时长的影片不自动下载（默认 1 分钟，0 = 不过滤）；手动点「下载」不受限制。</div>
           </div>
         </div>
         <div class="site-check" id="ph-check-result"></div>
@@ -2397,6 +2433,9 @@
       }
       case 'creator-add':
         openCreatorAddModal();
+        break;
+      case 'video-add':
+        openVideoAddModal();
         break;
       case 'creator-scan': {
         try {

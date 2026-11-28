@@ -3,7 +3,7 @@ FROM python:3.12-slim-bookworm
 
 LABEL org.opencontainers.image.title="Huangguo Collector"
 LABEL org.opencontainers.image.description="Huangguo collector: AI short-drama + creator subscription media library with Jellyfin/Emby scraping"
-LABEL org.opencontainers.image.version="1.11.4"
+LABEL org.opencontainers.image.version="1.11.5"
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

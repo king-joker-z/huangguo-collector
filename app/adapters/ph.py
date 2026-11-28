@@ -524,9 +524,10 @@ class PhScraper:
         return str(thumb_link.get("title") or thumb_link.get("aria-label") or "")
 
     # ------------------------------------------------------------------ detail
-    def fetch_detail(self, site_id: str) -> dict:
-        url = self.video_url(site_id)
-        html = self._get_text(url)
+    def fetch_detail(self, site_id: str, url: str = "") -> dict:
+        """抓取视频详情页。``url`` 可指定实际地址（单视频添加时用用户粘贴的链接）。"""
+        target = str(url or "").strip() or self.video_url(site_id)
+        html = self._get_text(target)
         if self._blocked(html):
             raise ScrapeError(f"视频页可能被 Cloudflare 拦截: {site_id}")
         return self.parse_detail(html, str(site_id))
@@ -608,6 +609,7 @@ class PhScraper:
             "status_text": "已完成",
             "views": views,
             "premiered": premiered,
+            "duration": duration,
             "duration_text": duration_text,
             "category_text": ",".join(tags[:8]),
             "tags": tags,

@@ -21,7 +21,7 @@ from .config import (
     module_media_type,
     modules_in_group,
 )
-from .creators import CreatorManager
+from .creators import CreatorManager, skip_short_video
 from .db import now_str
 from .groupctx import reset_group, set_group
 from .providers import provider_summary
@@ -761,25 +761,51 @@ def creator_sub_scan(creator_id: int):
 
 @router.post("/creator-subs/download")
 def creator_subs_download(payload: dict = None):
-    """把演员订阅博主的全部未下载影片加入队列。"""
+    """把演员订阅博主的全部未下载影片加入队列（跳过低于最短时长的影片）。"""
     payload = payload or {}
     ids = [int(i) for i in (payload.get("ids") or [])]
     items = creators.list()
     if ids:
         items = [item for item in items if int(item["id"]) in ids]
-    queued = 0
+    queued = skipped_short = 0
     for item in items:
         if not item.get("enabled"):
             continue
         creator_key = str(item.get("creator_key") or "")
         rows = db.query(
-            "SELECT id FROM dramas WHERE source='ph' AND creator_key=? AND is_duplicate=0",
+            "SELECT id,duration FROM dramas WHERE source='ph' AND creator_key=? AND is_duplicate=0",
             (creator_key,),
         )
         quality = str(item.get("quality") or "") or settings.get("quality", group="film")
         for row in rows:
+            if skip_short_video(settings, int(row["duration"] or 0)):
+                skipped_short += 1
+                continue
             queued += downloads.enqueue_new(int(row["id"]), quality)["queued"]
-    return ok(queued=queued, message=f"已加入队列 {queued} 部")
+    message = f"已加入队列 {queued} 部"
+    if skipped_short:
+        message += f"，跳过 {skipped_short} 部低于最短时长"
+    return ok(queued=queued, skipped_short=skipped_short, message=message)
+
+
+@router.post("/film/video")
+def film_video_add(payload: dict = Body(...)):
+    """欧美影视：粘贴视频详情页地址，添加单个影片（无需订阅博主）。"""
+    url = str(payload.get("url") or "").strip()
+    if not url:
+        fail("请填写影片地址")
+    try:
+        drama_id, created, message = creators.add_video(url)
+    except ScrapeError as exc:
+        fail(str(exc), 502)
+    except Exception as exc:
+        fail(f"添加影片失败: {exc}", 502)
+    if created:
+        try:
+            translator.maybe_translate_drama(drama_id)
+        except Exception:
+            pass
+    return ok(drama_id=drama_id, created=created, message=message)
 
 
 # ----------------------------------------------------------------------- tags

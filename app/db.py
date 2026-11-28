@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS dramas (
     cover_path TEXT DEFAULT '',
     score REAL,
     total_ep INTEGER DEFAULT 0,
+    duration INTEGER DEFAULT 0,
     description TEXT DEFAULT '',
     author TEXT DEFAULT '',
     status_text TEXT DEFAULT '',
@@ -331,6 +332,15 @@ class Database:
                 self.conn.execute("ALTER TABLE dramas ADD COLUMN actors_json TEXT DEFAULT '[]'")
             if "creator_key" not in columns:
                 self.conn.execute("ALTER TABLE dramas ADD COLUMN creator_key TEXT DEFAULT ''")
+            if "duration" not in columns:
+                self.conn.execute("ALTER TABLE dramas ADD COLUMN duration INTEGER DEFAULT 0")
+            # 欧美影视每部影片只有 1 集：缺时长时用分集时长回填，
+            # 让「自动下载最短时长」对历史影片也生效（幂等）。
+            self.conn.execute(
+                "UPDATE dramas AS d SET duration=COALESCE(("
+                "SELECT MAX(e.duration) FROM episodes e WHERE e.drama_id=d.id),0) "
+                "WHERE d.source='ph' AND (d.duration IS NULL OR d.duration=0)"
+            )
             self.conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_dramas_creator ON dramas(creator_key)"
             )
@@ -439,8 +449,8 @@ class Database:
             if row is None:
                 cur = self.conn.execute(
                     """INSERT INTO dramas(site_id,module,modules_json,source,title_key,title,url,cover_url,score,total_ep,
-                       views,tags_json,badges_json,creator_key,created_at,updated_at,last_scraped_at)
-                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       duration,duration_text,views,tags_json,badges_json,creator_key,created_at,updated_at,last_scraped_at)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         site_id,
                         card["module"],
@@ -452,6 +462,8 @@ class Database:
                         card.get("cover_url", ""),
                         card.get("score"),
                         total,
+                        int(card.get("duration") or 0),
+                        str(card.get("duration_text") or ""),
                         card.get("views", ""),
                         json_dumps(card.get("tags", [])),
                         json_dumps(card.get("badges", [])),
@@ -481,6 +493,7 @@ class Database:
             self.conn.execute(
                 """UPDATE dramas SET module=?,modules_json=?,source=?,title_key=?,title=?,url=?,cover_url=?,score=?,
                    total_ep=?,views=?,tags_json=?,badges_json=?,
+                   duration=CASE WHEN (duration IS NULL OR duration=0) THEN ? ELSE duration END,
                    creator_key=CASE WHEN ?<>'' THEN ? ELSE creator_key END,
                    last_scraped_at=?,
                    prev_total_ep=CASE WHEN ?=1 THEN ? ELSE prev_total_ep END,
@@ -499,6 +512,7 @@ class Database:
                     card.get("views", ""),
                     json_dumps(card.get("tags", [])),
                     json_dumps(card.get("badges", [])),
+                    int(card.get("duration") or 0),
                     card_creator,
                     card_creator,
                     ts,
@@ -519,7 +533,8 @@ class Database:
         ts = now_str()
         with self.lock:
             row = self.conn.execute(
-                "SELECT id,total_ep,detail_scraped_at,title_key,title,views FROM dramas WHERE site_id=?", (site_id,)
+                "SELECT id,total_ep,detail_scraped_at,title_key,title,views,duration FROM dramas WHERE site_id=?",
+                (site_id,),
             ).fetchone()
             if row is None:
                 raise KeyError(f"drama {site_id} not found")
@@ -530,9 +545,14 @@ class Database:
             key = title_key(incoming_title)
             has_update = old_total > 0 and int(detail.get("total_ep") or 0) > old_total
             creator_key = str(detail.get("creator_key") or "").strip()
+            episodes = detail.get("episodes") or []
+            detail_duration = int(detail.get("duration") or 0)
+            if not detail_duration and episodes:
+                detail_duration = int((episodes[0] or {}).get("duration") or 0)
             self.conn.execute(
                 """UPDATE dramas SET title=?,title_key=?,description=?,cover_url=?,score=?,total_ep=?,
                    author=?,status_text=?,views=?,premiered=?,duration_text=?,category_text=?,
+                   duration=CASE WHEN ?>0 THEN ? ELSE duration END,
                    tags_json=?,year=?,updated_at=?,detail_scraped_at=?,
                    creator_key=CASE WHEN ?<>'' THEN ? ELSE creator_key END,
                    prev_total_ep=CASE WHEN ?=1 THEN ? ELSE prev_total_ep END,
@@ -540,7 +560,8 @@ class Database:
                    WHERE id=?""",
                 (
                     incoming_title,
-                    key,                    detail.get("description") or "",
+                    key,
+                    detail.get("description") or "",
                     detail.get("cover_url") or "",
                     detail.get("score"),
                     new_total,
@@ -550,6 +571,8 @@ class Database:
                     detail.get("premiered") or "",
                     detail.get("duration_text") or "",
                     detail.get("category_text") or "",
+                    detail_duration,
+                    detail_duration,
                     json_dumps(detail.get("tags") or []),
                     detail.get("year"),
                     ts,
@@ -562,7 +585,6 @@ class Database:
                     row["id"],
                 ),
             )
-            episodes = detail.get("episodes") or []
             actors = detail.get("actors")
             if actors is not None:
                 self.conn.execute(

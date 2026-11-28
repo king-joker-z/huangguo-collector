@@ -201,6 +201,63 @@ class DatabaseStatsTests(unittest.TestCase):
         finally:
             reopened.conn.close()
 
+    def test_duration_persisted_and_backfilled(self):
+        """影片时长：列表卡片先写入，详情时长优先；老数据重新打开库时回填。"""
+        card = {
+            "site_id": "ph_dur1",
+            "source": "ph",
+            "module": "ph_creator",
+            "title": "时长测试",
+            "url": "https://example/view_video.php?viewkey=ph_dur1",
+            "cover_url": "",
+            "score": 0,
+            "total_ep": 1,
+            "views": "",
+            "tags": [],
+            "badges": [],
+            "duration": 754,
+            "duration_text": "12:34",
+        }
+        drama_id, _, _ = self.db.upsert_card(card)
+        row = self.db.get_drama(drama_id)
+        self.assertEqual(int(row["duration"]), 754)
+        self.assertEqual(row["duration_text"], "12:34")
+
+        # 详情页时长优先
+        self.db.apply_detail("ph_dur1", {
+            "title": "时长测试",
+            "total_ep": 1,
+            "tags": [],
+            "duration": 60,
+            "duration_text": "01:00",
+            "episodes": [{"ep": 1, "title": "正片", "duration": 60}],
+        })
+        self.assertEqual(int(self.db.get_drama(drama_id)["duration"]), 60)
+
+        # 列表卡片再次写入不会覆盖已知时长
+        self.db.upsert_card(card)
+        self.assertEqual(int(self.db.get_drama(drama_id)["duration"]), 60)
+
+        # 详情缺时长时用分集时长兜底
+        card2 = dict(card, site_id="ph_dur2", title="回填测试", duration=0, duration_text="")
+        drama2, _, _ = self.db.upsert_card(card2)
+        self.db.apply_detail("ph_dur2", {
+            "title": "回填测试",
+            "total_ep": 1,
+            "tags": [],
+            "episodes": [{"ep": 1, "title": "正片", "duration": 95}],
+        })
+        self.assertEqual(int(self.db.get_drama(drama2)["duration"]), 95)
+
+        # 老库缺时长：重新打开库时用分集时长回填（幂等）
+        self.db.execute("UPDATE dramas SET duration=0 WHERE site_id IN ('ph_dur1','ph_dur2')")
+        reopened = Database(Path(self.tmp.name) / "test.db")
+        try:
+            self.assertEqual(int(reopened.get_drama(drama_id)["duration"]), 60)
+            self.assertEqual(int(reopened.get_drama(drama2)["duration"]), 95)
+        finally:
+            reopened.conn.close()
+
     def test_excluded_site_and_custom_tags(self):
         card = {
             "site_id": "10020",

@@ -432,6 +432,45 @@ class CreatorSubscriptionTests(PhBase):
         with self.assertRaises(ph_mod.ScrapeError):
             self.manager.add("")
 
+    def test_add_single_video_by_url(self):
+        """单个视频：粘贴视频地址即可入库，不需要订阅博主。"""
+        drama_id, created, message = self.manager.add_video(
+            "https://www.example-site.com/view_video.php?viewkey=ph987654"
+        )
+        self.assertTrue(created)
+        self.assertIn("已添加影片", message)
+        row = self.db.get_drama(drama_id)
+        self.assertEqual(row["module"], "ph_creator")
+        self.assertEqual(row["source"], "ph")
+        self.assertEqual(row["title"], "Amateur blonde in lingerie")
+        self.assertEqual(row["creator_key"], "model/janedoe")
+        self.assertEqual(int(row["duration"]), 754)
+        self.assertEqual(row["duration_text"], "12:34")
+        self.assertEqual(len(self.db.get_episodes(drama_id)), 1)
+        self.assertEqual(self.db.list_dramas(group="film")["total"], 1)
+
+        # 已在库里：不再重复创建（裸 viewkey 也认）
+        again_id, created_again, message_again = self.manager.add_video("ph987654")
+        self.assertEqual(again_id, drama_id)
+        self.assertFalse(created_again)
+        self.assertIn("已在媒体库", message_again)
+
+        # 不是视频地址
+        with self.assertRaises(ph_mod.ScrapeError):
+            self.manager.add_video("https://www.example-site.com/model/janedoe")
+
+    def test_skip_short_video_threshold(self):
+        from app.creators import skip_short_video
+
+        self.assertTrue(skip_short_video(self.settings, 59))
+        self.assertFalse(skip_short_video(self.settings, 60))
+        self.assertFalse(skip_short_video(self.settings, 0))  # 时长未知不拦截
+        self.settings.update({"ph_min_duration": "2"}, group="film")
+        self.assertTrue(skip_short_video(self.settings, 119))
+        self.assertFalse(skip_short_video(self.settings, 120))
+        self.settings.update({"ph_min_duration": "0"}, group="film")
+        self.assertFalse(skip_short_video(self.settings, 5))
+
     def test_update_toggle_and_delete(self):
         item, _ = self.manager.add("https://www.example-site.com/model/janedoe")
         creator_id = int(item["id"])
@@ -582,6 +621,38 @@ class ScanFlowTests(PhBase):
         # 每部影片单独入队：最后一次自动下载批量为 1
         self.assertEqual(sub["last_auto_count"], 1)
         self.assertTrue(sub["last_auto_at"])
+
+    def _short_video_page(self) -> str:
+        """第二部影片的详情页：45 秒（低于默认 1 分钟下限）。"""
+        return (
+            VIDEO_PAGE.replace("Amateur blonde in lingerie", "Second video title")
+            .replace('"duration": 754', '"duration": 45')
+            .replace("PT12M34S", "PT0M45S")
+        )
+
+    def test_short_video_skipped_in_auto_download(self):
+        self.pages["viewkey=ph111222"] = self._short_video_page()
+        started, _ = self.scan.start(["ph_creator"], details=True, tab="sub:1")
+        self.assertTrue(started)
+        self.scan.thread.join(15)
+        self.assertEqual(self.scan.status()["state"], "done")
+
+        # 短影片照常入库（可手动下载），只是不进自动下载队列
+        films = self.db.list_dramas(group="film")
+        self.assertEqual(films["total"], 2)
+        short = next(item for item in films["items"] if item["title"] == "Second video title")
+        long_item = next(item for item in films["items"] if item["title"] == "Amateur blonde in lingerie")
+        self.assertEqual(int(self.db.get_drama(int(short["id"]))["duration"]), 45)
+        queued_ids = {call[0] for call in self.downloads.calls}
+        self.assertEqual(queued_ids, {int(long_item["id"])})
+
+    def test_min_duration_zero_disables_filter(self):
+        self.pages["viewkey=ph111222"] = self._short_video_page()
+        self.settings.update({"ph_min_duration": "0"}, group="film")
+        started, _ = self.scan.start(["ph_creator"], details=True, tab="sub:1")
+        self.assertTrue(started)
+        self.scan.thread.join(15)
+        self.assertEqual(len(self.downloads.calls), 2)
 
     def test_scan_without_subs_reports_error(self):
         self.db.execute("DELETE FROM creator_subs")
